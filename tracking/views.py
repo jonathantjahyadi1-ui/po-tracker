@@ -6,7 +6,7 @@ from datetime import timedelta
 from decimal import Decimal
 from django.conf import settings
 from django.contrib import messages
-from django.contrib.auth import login, logout
+from django.contrib.auth import logout
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.views import LoginView
 from django.core.exceptions import PermissionDenied, ValidationError
@@ -72,15 +72,6 @@ class SignIn(LoginView):
 def sign_out(request):
     logout(request)
     return redirect('login')
-
-@require_POST
-def demo_login(request):
-    if not settings.DEBUG or settings.DATABASE_URL or request.META.get('REMOTE_ADDR') not in ['127.0.0.1','::1']:
-        raise Http404()
-    role=request.POST.get('role','purchasing')
-    user=get_object_or_404(User,username='demo.'+role,is_active=True)
-    login(request,user,backend='django.contrib.auth.backends.ModelBackend')
-    return redirect('dashboard')
 
 @login_required
 def dashboard(request):

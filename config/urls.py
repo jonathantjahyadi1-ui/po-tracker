@@ -6,7 +6,6 @@ urlpatterns=[
     path('healthz/',views.health,name='health'),
     path('login/',views.SignIn.as_view(),name='login'),
     path('logout/',views.sign_out,name='logout'),
-    path('demo-login/',views.demo_login,name='demo_login'),
     path('reports/',views.reports_home,name='reports'),
     path('adjustment/',views.adjustment,name='adjustment'),
     path('evidence/<int:pk>/',views.download_evidence,name='evidence'),

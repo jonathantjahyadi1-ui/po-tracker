@@ -1,8 +1,8 @@
 $ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath $PSScriptRoot
-if ($env:DATABASE_URL) { throw 'Pratinjau lokal harus memakai database contoh. Jalankan di terminal tanpa DATABASE_URL.' }
+if ($env:DATABASE_URL) { throw 'Launcher lokal memakai SQLite. Jalankan di terminal tanpa DATABASE_URL.' }
 if ((Test-Path -LiteralPath '.env') -and (Select-String -LiteralPath '.env' -Pattern '^\s*DATABASE_URL\s*=\s*\S' -Quiet)) {
-    throw 'File .env berisi DATABASE_URL. Gunakan folder salinan tanpa koneksi Supabase untuk demo lokal.'
+    throw 'File .env berisi DATABASE_URL. Ikuti DEPLOYMENT.md untuk menjalankan aplikasi dengan Supabase.'
 }
 if (-not (Test-Path -LiteralPath '.venv\Scripts\python.exe')) {
     $taskLauncher = Get-Command py -ErrorAction SilentlyContinue
@@ -21,6 +21,6 @@ if (-not (Test-Path -LiteralPath '.venv\Scripts\python.exe')) {
 $env:DEBUG = 'true'
 & '.\.venv\Scripts\python.exe' manage.py migrate --noinput
 if ($LASTEXITCODE -ne 0) { throw 'Migrasi gagal.' }
-& '.\.venv\Scripts\python.exe' manage.py seed_demo
-if ($LASTEXITCODE -ne 0) { throw 'Seed demo gagal.' }
+& '.\.venv\Scripts\python.exe' manage.py bootstrap_admin
+if ($LASTEXITCODE -ne 0) { throw 'Inisialisasi akun Super Admin gagal.' }
 & '.\.venv\Scripts\python.exe' manage.py runserver 127.0.0.1:8765
