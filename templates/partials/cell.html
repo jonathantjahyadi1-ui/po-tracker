@@ -1,0 +1,1 @@
+{% if c.link %}<a class="reference" href="{{ c.link }}">{{ c.value }}</a>{% elif c.status %}<span class="badge {{ c.status }}">{{ c.value }}</span>{% else %}{{ c.value }}{% endif %}{% if c.sub %}<small>{{ c.sub }}</small>{% endif %}
