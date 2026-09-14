@@ -26,8 +26,20 @@ document.addEventListener('DOMContentLoaded', () => {
     fieldset.querySelector('select,input')?.focus();
   });
   document.querySelectorAll('[data-submit-form]').forEach(form => {
-    form.addEventListener('submit', () => {
+    form.addEventListener('submit', (event) => {
+      // Disabled buttons are omitted from POST, so keep the selected action in a hidden field.
+      form.querySelectorAll('[data-submit-intent]').forEach(input => input.remove());
+      const submitter = event.submitter;
+      if (submitter?.name) {
+        const intent = document.createElement('input');
+        intent.type = 'hidden';
+        intent.name = submitter.name;
+        intent.value = submitter.value;
+        intent.dataset.submitIntent = 'true';
+        form.appendChild(intent);
+      }
       form.querySelectorAll('button[type="submit"]').forEach(button => {
+        button.dataset.originalLabel = button.innerHTML;
         button.disabled = true;
         button.textContent = 'Menyimpan…';
       });
@@ -35,7 +47,11 @@ document.addEventListener('DOMContentLoaded', () => {
   });
   window.addEventListener('pageshow', () => {
     document.querySelectorAll('[data-submit-form] button[type="submit"]').forEach(button => {
-      if (button.disabled) { button.disabled = false; button.textContent = 'Simpan'; }
+      if (button.disabled) {
+        button.disabled = false;
+        // Saved markup comes only from the server-rendered button.
+        button.innerHTML = button.dataset.originalLabel || 'Simpan';
+      }
     });
   });
 });

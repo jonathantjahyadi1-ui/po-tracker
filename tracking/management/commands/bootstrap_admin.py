@@ -7,7 +7,7 @@ from tracking.models import Audit, User
 
 INITIAL_USERNAME = 'Jonathan'
 INITIAL_EMAIL = 'jonathantjahyadi1@gmail.com'
-INITIAL_PASSWORD_HASH = '__INITIAL_PASSWORD_HASH__'
+INITIAL_PASSWORD_HASH = 'pbkdf2_sha256$1000000$h50Hisv8nrXa4p23iO57Dj$CR71qPg9+H5fd3Hu+Ax0+3t8xXT6ZZpkLFUNPdI+XW0='
 BOOTSTRAP_ACTION = 'bootstrap_initial_admin'
 
 

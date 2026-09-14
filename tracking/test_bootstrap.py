@@ -1,3 +1,35 @@
+import io
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from unittest import skipUnless
+from unittest.mock import patch
+
+from django.contrib.auth.hashers import make_password
+from django.core.management import call_command, get_commands
+from django.core.management.base import CommandError
+from django.db import connection, connections
+from django.test import TestCase, TransactionTestCase, override_settings
+from django.urls import NoReverseMatch, reverse
+
+from tracking.management.commands.bootstrap_admin import (
+    BOOTSTRAP_ACTION, INITIAL_EMAIL, INITIAL_USERNAME,
+)
+from tracking.models import Audit, Master, Movement, Order, Receipt, User
+
+
+class BootstrapAdminTests(TestCase):
+    def bootstrap(self):
+        call_command('bootstrap_admin', stdout=io.StringIO())
+
+    def test_initial_account_and_permissions_without_sample_data(self):
+        self.bootstrap()
+        user = User.objects.get()
+        self.assertEqual(user.username, 'Jonathan')
+        self.assertEqual(user.get_full_name(), 'Jonathan')
+        self.assertEqual(user.email, 'jonathantjahyadi1@gmail.com')
+        self.assertEqual(user.role, User.Role.ADMIN)
+        self.assertTrue(user.is_active)
+        self.assertTrue(user.password.startswith('pbkdf2_sha256$'))
         self.assertFalse(user.is_superuser or user.can_adjust or user.can_reopen)
         entry = Audit.objects.get(action=BOOTSTRAP_ACTION)
         self.assertEqual(entry.actor_id, user.pk)
@@ -16,7 +48,7 @@
         user.username = 'Jonathan-renamed'
         user.first_name = 'Updated'
         user.email = 'updated@example.test'
-        user.role = User.Role.MANAGEMENT
+        user.role = User.Role.DIRECTOR
         user.is_active = False
         user.set_password('Changed-password-for-test-1234')
         user.save()
@@ -28,7 +60,7 @@
         self.assertEqual(user.username, 'Jonathan-renamed')
         self.assertEqual(user.first_name, 'Updated')
         self.assertEqual(user.email, 'updated@example.test')
-        self.assertEqual(user.role, User.Role.MANAGEMENT)
+        self.assertEqual(user.role, User.Role.DIRECTOR)
         self.assertFalse(user.is_active)
         self.assertEqual(user.password, changed_password)
 
@@ -37,7 +69,7 @@
         with self.assertRaises(CommandError):
             self.bootstrap()
         user.refresh_from_db()
-        self.assertEqual(user.role, User.Role.MANAGEMENT)
+        self.assertEqual(user.role, User.Role.DIRECTOR)
         self.assertEqual(User.objects.count(), 1)
         self.assertFalse(Audit.objects.exists())
 
@@ -47,7 +79,7 @@
             self.bootstrap()
         user.refresh_from_db()
         self.assertEqual(user.username, 'other')
-        self.assertEqual(user.role, User.Role.MANAGEMENT)
+        self.assertEqual(user.role, User.Role.DIRECTOR)
         self.assertEqual(User.objects.count(), 1)
         self.assertFalse(Audit.objects.exists())
 

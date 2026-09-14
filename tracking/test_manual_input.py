@@ -69,6 +69,23 @@ class ManualInputTests(TestCase):
         self.assertNotContains(response,'<select')
         self.assertContains(response,'name="lines-__prefix__-material"')
 
+    def test_service_failure_and_deleted_lines_do_not_leave_master_records(self):
+        data={'token':str(uuid.uuid4()),'vendor':'Vendor baru','invoice':'INV GAGAL',
+              'received_date':'2026-09-14','invoice_total':'1000','warehouse':'Gudang baru',
+              'lines-TOTAL_FORMS':'2','lines-INITIAL_FORMS':'0',
+              'lines-0-material':'Bahan baru','lines-0-color':'Putih','lines-0-unit':'Yard',
+              'lines-0-warehouse':'Gudang baru','lines-0-rolls':'0','lines-0-yards':'0',
+              'lines-1-material':'Baris dihapus','lines-1-DELETE':'on'}
+        response=self.client.post('/receipts/new/',data)
+        self.assertEqual(response.status_code,400)
+        self.assertFalse(Master.objects.exists())
+        self.assertFalse(Receipt.objects.exists())
+        self.assertFalse(Audit.objects.filter(action='create_master').exists())
+        data.update({'token':str(uuid.uuid4()),'lines-0-rolls':'1','lines-0-yards':'30'})
+        response=self.client.post('/receipts/new/',data)
+        self.assertEqual(response.status_code,302,response.content.decode())
+        self.assertFalse(Master.objects.filter(name='Baris dihapus').exists())
+
     def test_inactive_and_ambiguous_names_are_rejected(self):
         for code in ['A','B']:
             Master.objects.create(kind='product',code=code,name='Nama sama',created_by=self.p)
@@ -77,6 +94,10 @@ class ManualInputTests(TestCase):
         self.assertEqual(field.clean('A').code,'A')
         Master.objects.create(kind='product',code='OLD',name='Produk lama',active=False,created_by=self.p)
         with self.assertRaises(ValidationError): field.clean('Produk lama')
+        created=field.clean('Nama awal otomatis')
+        created.name='Nama sudah diganti'
+        created.save()
+        with self.assertRaises(ValidationError): field.clean('Nama awal otomatis')
 
     def test_typed_labels_map_to_business_codes(self):
         field=app_forms.ProgressForm().fields['stage']
@@ -116,3 +137,21 @@ class ManualReferenceTests(Fixture,TestCase):
         form=app_forms.OrderForm(instance=self.order)
         self.assertIn('CMT',form['cmts'].value())
         self.assertIn(self.product.name,form['product'].value())
+
+    def test_operational_pages_open_with_existing_references(self):
+        shipment=self.shipment()
+        finished=services.send_finished(self.p,self.report(order=self.order,cmt=self.cmt,warehouse=self.wh,delivery_note='HSL-TEST',quantity=10))
+        draft=Order.objects.create(number='PO DRAFT',product=self.product,target=10,created_by=self.p)
+        paths=['/masters/new/','/receipts/new/','/orders/new/',
+               f'/shipments/{shipment.pk}/',
+               f'/orders/{draft.pk}/edit/',f'/receipts/{self.receipt.pk}/',
+               f'/allocations/new/?order={self.order.pk}',
+               f'/shipments/new/?allocation={shipment.allocation_id}',
+               f'/cmt/new/?line={shipment.lines.first().pk}',
+               f'/progress/new/?order={self.order.pk}',
+               f'/finished/new/?order={self.order.pk}',
+               f'/warehouse/new/?shipment={finished.pk}',
+               '/reconciliation/new/',f'/adjustment/?lot={self.lot.pk}']
+        for path in paths:
+            with self.subTest(path=path):
+                self.assertEqual(self.client.get(path).status_code,200)

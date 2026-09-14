@@ -1,11 +1,11 @@
 import uuid
 from django import forms
-from django.contrib.auth.forms import AuthenticationForm, UserCreationForm
+from django.contrib.auth.forms import AuthenticationForm
 from django.core.exceptions import ValidationError
 from .models import *
 from .manual_fields import manualize
 
-LABELS = {'kind':'Jenis','code':'Kode','name':'Nama','pic':'PIC pelapor','contact':'Kontak','notes':'Catatan / alasan','active':'Aktif','unit':'Satuan','standard_usage':'Standar pemakaian (yard/pcs)','target_qty':'Target (pcs)','vendor':'Vendor','invoice':'Nomor invoice','delivery_note':'Nomor surat jalan','invoice_date':'Tanggal invoice','received_date':'Tanggal diterima','invoice_total':'Total invoice (Rp)','warehouse':'Lokasi / gudang','revision_of':'Revisi dari invoice','material':'Bahan','color':'Warna','rolls':'Roll','yards':'Yard','number':'Nomor PO','product':'Produk','target':'Target hasil (pcs)','cmts':'CMT pelaksana','order_date':'Tanggal order','due_date':'Target selesai','order':'PO produksi','source_order':'PO sumber transfer (opsional)','cmt':'CMT','planned_date':'Rencana kirim','lot':'Lot / invoice','allocation_line':'Baris alokasi','sent_date':'Tanggal kirim','report_date':'Tanggal laporan','medium':'Media laporan','condition':'Kondisi','stage':'Tahap','quantity':'Jumlah (pcs)','reject':'Reject (pcs)','eta':'Estimasi selesai','shipment':'Pengiriman hasil','received':'Diterima (pcs)','good':'Good (pcs)','discrepancy':'Ada selisih / kerusakan','action':'Tindakan','target_allocation':'Alokasi transfer yang disetujui','username':'Nama pengguna','first_name':'Nama lengkap','email':'Email','role':'Role','is_active':'Akun aktif','can_adjust':'Hak adjustment','can_reopen':'Hak buka kembali PO','password1':'Kata sandi','password2':'Ulangi kata sandi'}
+LABELS = {'kind':'Jenis','code':'Kode','name':'Nama','pic':'PIC pelapor','contact':'Kontak','notes':'Catatan / alasan','active':'Aktif','unit':'Satuan','standard_usage':'Standar pemakaian (yard/pcs)','target_qty':'Target (pcs)','vendor':'Vendor','invoice':'Nomor invoice','delivery_note':'Nomor surat jalan','invoice_date':'Tanggal invoice','received_date':'Tanggal diterima','invoice_total':'Total invoice (Rp)','warehouse':'Lokasi / gudang','revision_of':'Revisi dari invoice','material':'Bahan','color':'Warna','rolls':'Roll','yards':'Yard','number':'Nomor PO','product':'Produk','target':'Target hasil (pcs)','cmts':'CMT pelaksana','order_date':'Tanggal order','due_date':'Target selesai','order':'PO produksi','source_order':'PO sumber transfer (opsional)','cmt':'CMT','planned_date':'Rencana kirim','lot':'Lot / invoice','allocation_line':'Baris alokasi','sent_date':'Tanggal kirim','report_date':'Tanggal laporan','medium':'Media laporan','condition':'Kondisi','stage':'Tahap','quantity':'Jumlah (pcs)','reject':'Reject (pcs)','eta':'Estimasi selesai','shipment':'Pengiriman hasil','received':'Diterima (pcs)','good':'Good (pcs)','discrepancy':'Ada selisih / kerusakan','action':'Tindakan','target_allocation':'Alokasi transfer aktif','username':'Nama pengguna','first_name':'Nama lengkap','email':'Email','role':'Role','is_active':'Akun aktif','password1':'Kata sandi','password2':'Ulangi kata sandi'}
 
 class BaseForm(forms.ModelForm):
     token = forms.UUIDField(widget=forms.HiddenInput,initial=uuid.uuid4)
@@ -165,7 +165,7 @@ class ReconciliationForm(BaseForm):
         super().__init__(*args,**kwargs)
         self.masters(cmt='cmt',warehouse='warehouse')
         self.fields['order'].queryset=Order.objects.exclude(status__in=['draft','closed','cancelled'])
-        self.fields['target_allocation'].queryset=AllocationLine.objects.filter(allocation__source_order__isnull=False,allocation__status__in=['approved','partially_shipped'])
+        self.fields['target_allocation'].queryset=AllocationLine.objects.filter(allocation__source_order__isnull=False,allocation__status__in=['allocated','partially_shipped'])
         self.fields['target_allocation'].label_from_instance=lambda x:f'{x.allocation} → {x.allocation.order} · {x.lot.code}'
 
 class ActionForm(forms.Form):
@@ -175,9 +175,6 @@ class ActionForm(forms.Form):
     def __init__(self,*args,**kwargs):
         super().__init__(*args,**kwargs)
         manualize(self)
-
-class DecisionForm(ActionForm):
-    decision=forms.ChoiceField(label='Keputusan',choices=[('approved','Setujui'),('rejected','Tolak'),('revision','Minta revisi')])
 
 class ResolutionForm(ActionForm):
     resolution=forms.ChoiceField(label='Resolusi',choices=[('confirmed','Penerimaan telah sesuai / kerusakan direkonsiliasi'),('loss','Catat kehilangan dari sisa pengiriman')])
@@ -200,7 +197,7 @@ class AccountForm(forms.ModelForm):
     token=forms.UUIDField(initial=uuid.uuid4,widget=forms.HiddenInput)
     class Meta:
         model=User
-        fields=['username','first_name','email','role','is_active','can_adjust','can_reopen']
+        fields=['username','first_name','email','role','is_active']
         labels=LABELS
     def __init__(self,*args,**kwargs):
         super().__init__(*args,**kwargs)
@@ -213,15 +210,11 @@ class AccountForm(forms.ModelForm):
             self.fields['new_password'].help_text='Minimal 6 karakter.'
     def clean(self):
         data=super().clean()
-        if not self.instance.pk:
-            data['is_active']=True
         from django.contrib.auth.password_validation import validate_password
         if data.get('new_password'):
             validate_password(data['new_password'],self.instance)
         elif not self.instance.pk:
             self.add_error('new_password','Kata sandi wajib untuk akun baru.')
-        if data.get('role') != 'purchasing' and (data.get('can_adjust') or data.get('can_reopen')):
-            raise ValidationError('Hak adjustment dan buka kembali hanya untuk Purchasing.')
         return data
 
 class FilterForm(forms.Form):

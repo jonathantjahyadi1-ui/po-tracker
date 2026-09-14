@@ -21,14 +21,16 @@ class User(AbstractUser):
         DIRECTOR = 'director', 'Direktur'
         ADMIN = 'admin', 'Super Admin'
     role = models.CharField(max_length=20, choices=Role.choices, default=Role.DIRECTOR)
+    # Kept for existing backups; operational permissions now follow the Purchasing role.
     can_adjust = models.BooleanField(default=False)
     can_reopen = models.BooleanField(default=False)
 
-class Meta(AbstractUser.Meta):
-    constraints = [models.CheckConstraint(
-        condition=Q(role__in=['purchasing', 'director', 'admin']),
-        name='valid_user_role'
-    )]      
+    class Meta(AbstractUser.Meta):
+        constraints = [models.CheckConstraint(
+            condition=Q(role__in=['purchasing', 'director', 'admin']),
+            name='valid_user_role',
+        )]
+
 class Record(models.Model):
     created_at = models.DateTimeField(default=timezone.now, editable=False, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -156,9 +158,9 @@ class Allocation(Record):
     class Meta:
         ordering = ['-id']
         constraints = [models.CheckConstraint(
-                    condition=Q(status__in=['draft', 'allocated', 'partially_shipped','rejected', 'fully_shipped', 'cancelled']),
-                    name='valid_allocation_status',
-                )]
+            condition=Q(status__in=['draft', 'allocated', 'partially_shipped', 'fully_shipped', 'cancelled', 'rejected']),
+            name='valid_allocation_status',
+        )]
     def __str__(self):
         return f'AL-{self.pk:05d}' if self.pk else 'Alokasi baru'
 

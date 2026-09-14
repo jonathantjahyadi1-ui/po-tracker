@@ -64,7 +64,8 @@ class SimpleAccountTests(TestCase):
         form=AccountForm(data=self.payload(is_active=False))
         self.assertNotIn('is_active',form.fields)
         self.assertTrue(form.is_valid(),form.errors)
-        self.assertTrue(business_data(form)['is_active'])
+        user=save_account(self.admin,business_data(form),form.cleaned_data['new_password'])
+        self.assertTrue(user.is_active)
 
     def test_only_super_admin_can_create_accounts(self):
         for role in ['purchasing','director']:

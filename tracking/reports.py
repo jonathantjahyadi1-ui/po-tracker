@@ -2,11 +2,11 @@ from collections import defaultdict
 from decimal import Decimal
 from django.db.models import Q, Sum
 from .models import *
-from .presentation import cell, row, url, date, number, STATUS, ACTION_LABELS, ENTITY_LABELS
+from .presentation import cell, row, url, date, number, STATUS, ACTION_LABELS, ENTITY_LABELS, ROLE_LABELS
 from .services import totals
 
-TITLES={'receipts':'Penerimaan bahan','stock':'Stok bahan','movements':'Kartu stok','orders':'PO produksi','allocations':'Alokasi bahan','approvals':'Persetujuan','shipments':'Pengiriman bahan','cmt':'Penerimaan CMT','progress':'Progres produksi','finished':'Pengiriman hasil','warehouse':'Penerimaan gudang','reconciliation':'Sisa bahan','exceptions':'Selisih & resolusi','corrections':'Koreksi & reversal','audit':'Audit log','masters':'Data master','accounts':'Akun pengguna'}
-MODEL_MAP={'receipts':Receipt,'orders':Order,'allocations':Allocation,'approvals':Allocation,'shipments':Shipment,'cmt':CMTReceipt,'progress':Progress,'finished':FinishedShipment,'warehouse':WarehouseReceipt,'reconciliation':Reconciliation,'exceptions':Discrepancy,'corrections':Correction,'audit':Audit,'masters':Master,'accounts':User,'stock':Lot}
+TITLES={'receipts':'Penerimaan bahan','stock':'Stok bahan','movements':'Kartu stok','orders':'PO produksi','allocations':'Alokasi bahan','shipments':'Pengiriman bahan','cmt':'Penerimaan CMT','progress':'Progres produksi','finished':'Pengiriman hasil','warehouse':'Penerimaan gudang','reconciliation':'Sisa bahan','exceptions':'Selisih & resolusi','corrections':'Koreksi & reversal','audit':'Audit log','masters':'Data master','accounts':'Akun pengguna'}
+MODEL_MAP={'receipts':Receipt,'orders':Order,'allocations':Allocation,'shipments':Shipment,'cmt':CMTReceipt,'progress':Progress,'finished':FinishedShipment,'warehouse':WarehouseReceipt,'reconciliation':Reconciliation,'exceptions':Discrepancy,'corrections':Correction,'audit':Audit,'masters':Master,'accounts':User,'stock':Lot}
 FILTER_PATHS={
  'receipts':{'vendor':'vendor','material':'lines__material','color':'lines__color','warehouse':'lines__warehouse','date':'received_date','search':['invoice','vendor__name','delivery_note'],'status':'status'},
  'orders':{'product':'product','cmt':'cmts','order':'pk','date':'order_date','search':['number','product__name'],'status':'status'},
@@ -24,7 +24,6 @@ FILTER_PATHS={
  'corrections':{'date':'created_at__date','search':['reason','kind']},
  'stock':{'vendor':'lot__receipt_line__receipt__vendor','material':'lot__receipt_line__material','color':'lot__receipt_line__color','order':'order','product':'order__product','warehouse':'location','cmt':'location','date':'created_at__date','search':['lot__code','lot__receipt_line__receipt__invoice','lot__receipt_line__material__name','lot__receipt_line__color__name'],'status':'bucket'},
 }
-FILTER_PATHS['approvals']=FILTER_PATHS['allocations']
 FILTER_PATHS['movements']=FILTER_PATHS['stock']
 FILTER_PATHS['stock']['scope']='location__kind'
 
@@ -105,8 +104,6 @@ def dataset(kind,filters,user,extra=None):
     if kind=='audit':
         if user.role!='admin':
             qs=qs.filter(actor=user)
-    if kind=='approvals':
-        qs=qs.filter(status='pending')
     if kind=='orders':
         qs=qs.filter(archived=extra.get('archive')=='1')
         if extra.get('overdue')=='1':
@@ -116,7 +113,7 @@ def dataset(kind,filters,user,extra=None):
     if kind=='exceptions' and extra.get('resolved')!='1':
         qs=qs.filter(resolved=False)
     qs=filter_query(qs,kind,filters)
-    relations={'receipts':['vendor','warehouse'],'orders':['product'],'allocations':['order','cmt'],'approvals':['order','cmt'],'shipments':['allocation__order','allocation__cmt'],'cmt':['shipment_line__shipment__allocation__order','shipment_line__shipment__allocation__cmt','shipment_line__allocation_line__lot'],'progress':['order','cmt'],'finished':['order','cmt','warehouse'],'warehouse':['shipment__order','shipment__warehouse'],'reconciliation':['order','cmt','lot'],'audit':['actor'],'exceptions':['shipment_line__shipment__allocation__order','finished_shipment__order'],'corrections':['created_by']}
+    relations={'receipts':['vendor','warehouse'],'orders':['product'],'allocations':['order','cmt'],'shipments':['allocation__order','allocation__cmt'],'cmt':['shipment_line__shipment__allocation__order','shipment_line__shipment__allocation__cmt','shipment_line__allocation_line__lot'],'progress':['order','cmt'],'finished':['order','cmt','warehouse'],'warehouse':['shipment__order','shipment__warehouse'],'reconciliation':['order','cmt','lot'],'audit':['actor'],'exceptions':['shipment_line__shipment__allocation__order','finished_shipment__order'],'corrections':['created_by']}
     if kind in relations:
         qs=qs.select_related(*relations[kind])
     qs=qs.order_by('id' if extra.get('sort')=='oldest' else '-id')
@@ -137,7 +134,7 @@ def dataset(kind,filters,user,extra=None):
             t=totals(o)
             headers=['PO / produk','Target','Good diterima','Reject','Sisa target','Kelebihan','Target selesai','Status']
             cells=[cell(o.number,url(o),sub=o.product.name),cell(number(o.target),numeric=True),cell(number(t['good']),numeric=True),cell(number(t['reject']),numeric=True),cell(number(t['remaining']),numeric=True),cell(number(t['over']),numeric=True),cell(date(o.due_date)),cell(o.status,status=True)]
-        elif kind in ['allocations','approvals']:
+        elif kind=='allocations':
             q=o.lines.aggregate(r=Sum('rolls'),y=Sum('yards'))
             headers=['Alokasi','PO','CMT','Roll','Yard','Rencana kirim','Status']
             cells=[cell(str(o),url(o),sub='Transfer' if o.source_order_id else 'Gudang → CMT'),cell(o.order.number,url(o.order)),cell(o.cmt.name),cell(number(q['r'] or 0),numeric=True),cell(number(q['y'] or ZERO,2),numeric=True),cell(date(o.planned_date)),cell(o.status,status=True)]
@@ -168,7 +165,7 @@ def dataset(kind,filters,user,extra=None):
             cells=[cell(o.username,url(o)),cell(o.get_full_name() or '—'),cell(o.get_role_display()),cell(o.email or '—'),cell(date(timezone.localtime(o.last_login)) if o.last_login else '—'),cell('Aktif' if o.is_active else 'Nonaktif')]
         elif kind=='audit':
             headers=['Waktu','Pengguna','Role','Aksi','Entitas','ID','Perubahan','Request ID']
-            cells=[cell(date(timezone.localtime(o.created_at)),sub=timezone.localtime(o.created_at).strftime('%H:%M:%S')),cell(o.actor.username if o.actor else 'Sistem'),cell(o.role),cell(ACTION_LABELS.get(o.action,o.action)),cell(ENTITY_LABELS.get(o.entity,o.entity)),cell(o.object_id),cell(str(o.after)),cell(o.request_id)]
+            cells=[cell(date(timezone.localtime(o.created_at)),sub=timezone.localtime(o.created_at).strftime('%H:%M:%S')),cell(o.actor.username if o.actor else 'Sistem'),cell(ROLE_LABELS.get(o.role,o.role)),cell(ACTION_LABELS.get(o.action,o.action)),cell(ENTITY_LABELS.get(o.entity,o.entity)),cell(o.object_id),cell(str(o.after)),cell(o.request_id)]
         elif kind=='exceptions':
             order=o.shipment_line.shipment.allocation.order if o.shipment_line else o.finished_shipment.order
             headers=['Referensi','PO','Catatan selisih','Dicatat','Status']

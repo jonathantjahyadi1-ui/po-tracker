@@ -19,9 +19,8 @@ D=Decimal
 
 class Fixture:
     def build(self):
-        self.p=User.objects.create(username='purchasing',role='purchasing',can_adjust=True,can_reopen=True)
-        self.a=User.objects.create(username='approver',role='approver')
-        self.m=User.objects.create(username='management',role='management')
+        self.p=User.objects.create(username='purchasing',role='purchasing',can_adjust=False,can_reopen=False)
+        self.director=User.objects.create(username='director',role='director')
         self.admin=User.objects.create(username='admin',role='admin')
         def master(kind,code):
             return s.save_master(self.p,{'kind':kind,'code':code,'name':code})
@@ -41,11 +40,10 @@ class Fixture:
             s.post_receipt(self.p,self.receipt.pk)
         self.lot=self.receipt.lines.first().lot
         return self.lot
-    def allocate(self,r=10,y='300',order=None,approve=True):
+    def allocate(self,r=10,y='300',order=None,post=True):
         self.posted()
         al=s.save_allocation(self.p,{'order':order or self.order,'cmt':self.cmt},[{'lot':self.lot,'warehouse':self.wh,'rolls':r,'yards':D(y)}])
-        s.submit_allocation(self.p,al.pk)
-        if approve: s.decide_allocation(self.a,al.pk,'approved')
+        if post: s.post_allocation(self.p,al.pk)
         al.refresh_from_db(); return al
     def shipment(self,allocation=None,r=10,y='300',dispatch=True):
         allocation=allocation or self.allocate(r,y)
@@ -78,8 +76,10 @@ class AcceptanceTests(Fixture,TestCase):
     def test_at03_allocation_exceeding_stock_rejected(self):
         with self.assertRaises(ValidationError): self.allocate(51,'1665.50')
         self.assertEqual(s.balance(bucket='reserved'),(0,D('0')))
-    def test_at05_approval_reserves_without_physical_reduction(self):
-        self.allocate(10,'300.25')
+    def test_at05_purchasing_posts_allocation_without_physical_reduction(self):
+        allocation=self.allocate(10,'300.25')
+        self.assertEqual(allocation.status,'allocated')
+        self.assertFalse(Decision.objects.exists())
         self.assertEqual(s.balance(bucket='physical'),(50,D('1665.50')))
         self.assertEqual(s.balance(bucket='reserved'),(10,D('300.25')))
         self.assertEqual(s.available(self.lot,self.wh),(40,D('1365.25')))
@@ -130,8 +130,8 @@ class AcceptanceTests(Fixture,TestCase):
         self.posted()
         with self.assertRaises(ValidationError): s.save_receipt(self.p,{'vendor':self.vendor,'invoice':'edit','warehouse':self.wh},[],pk=self.receipt.pk,version=1)
         self.assertEqual(s.balance(bucket='physical'),(50,D('1665.50')))
-    def test_at13_management_and_admin_api_denied(self):
-        for user in [self.m,self.a,self.admin]:
+    def test_at13_director_and_admin_api_denied(self):
+        for user in [self.director,self.admin]:
             self.client.force_login(user)
             before=Audit.objects.count()
             response=self.client.post(f'/receipts/{self.receipt.pk}/action/post/',{'token':str(uuid.uuid4())})
@@ -140,7 +140,7 @@ class AcceptanceTests(Fixture,TestCase):
         self.assertEqual(Movement.objects.count(),0)
     def test_at14_export_matches_active_filter_and_no_formula_injection(self):
         self.allocate(); self.finished(20)
-        self.client.force_login(self.m)
+        self.client.force_login(self.director)
         from openpyxl import load_workbook
         response=self.client.get('/warehouse/export/',{'cmt':self.cmt.pk,'start':self.today.isoformat(),'end':self.today.isoformat()})
         self.assertEqual(response.status_code,200)
@@ -185,26 +185,145 @@ class AcceptanceTests(Fixture,TestCase):
         with self.assertRaises(ValidationError): s.post_receipt(self.p,r.pk)
         self.assertFalse(Lot.objects.exists()); self.assertFalse(Movement.objects.exists())
         r.refresh_from_db(); self.assertEqual(r.status,'draft')
-    def test_approval_rechecks_stock_after_submit(self):
-        first=self.allocate(40,'1300',approve=False)
-        second=self.allocate(40,'1300',order=self.new_order('PO SECOND'),approve=False)
-        s.decide_allocation(self.a,first.pk,'approved')
-        with self.assertRaises(ValidationError): s.decide_allocation(self.a,second.pk,'approved')
-        self.assertEqual(Decision.objects.count(),1)
-    def test_purchasing_cannot_approve(self):
-        al=self.allocate(approve=False)
-        with self.assertRaises(PermissionDenied): s.decide_allocation(self.p,al.pk,'approved')
-    def test_approval_cannot_be_decided_twice(self):
-        al=self.allocate()
-        with self.assertRaises(ValidationError): s.decide_allocation(self.a,al.pk,'rejected','Tidak')
-        self.assertEqual(Decision.objects.count(),1)
-    def test_revision_updates_require_version_and_resubmit(self):
-        al=self.allocate(approve=False)
-        s.decide_allocation(self.a,al.pk,'revision','Kurangi bahan'); al.refresh_from_db()
-        with self.assertRaises(ValidationError): s.save_allocation(self.p,{'order':self.order,'cmt':self.cmt},[],pk=al.pk,version=1)
+    def test_allocation_post_rechecks_stock_and_rolls_back_failure(self):
+        first=self.allocate(40,'1300',post=False)
+        second=self.allocate(40,'1300',order=self.new_order('PO SECOND'),post=False)
+        s.post_allocation(self.p,first.pk)
+        before=(Movement.objects.count(),Audit.objects.count(),Operation.objects.count())
+        with self.assertRaises(ValidationError): s.post_allocation(self.p,second.pk,key=uuid.uuid4())
+        second.refresh_from_db()
+        self.assertEqual(second.status,'draft')
+        self.assertEqual((Movement.objects.count(),Audit.objects.count(),Operation.objects.count()),before)
+        self.assertEqual(s.balance(bucket='reserved'),(40,D('1300')))
+        self.assertFalse(Decision.objects.exists())
+    def test_director_and_admin_cannot_post_or_cancel_allocation(self):
+        al=self.allocate(post=False)
+        for actor in [self.director,self.admin]:
+            with self.assertRaises(PermissionDenied): s.post_allocation(actor,al.pk)
+            with self.assertRaises(PermissionDenied): s.cancel_allocation(actor,al.pk,'Tidak berwenang')
+        al.refresh_from_db()
+        self.assertEqual(al.status,'draft')
+        self.assertEqual(s.balance(bucket='reserved'),(0,D('0')))
+    def test_allocation_post_retries_do_not_double_reserve(self):
+        al=self.allocate(post=False); token=uuid.uuid4()
+        first=s.post_allocation(self.p,al.pk,key=token)
+        second=s.post_allocation(self.p,al.pk,key=token)
+        self.assertEqual(first.pk,second.pk)
+        with self.assertRaises(ValidationError): s.post_allocation(self.p,al.pk,key=uuid.uuid4())
+        self.assertEqual(s.balance(bucket='reserved'),(10,D('300')))
+        self.assertEqual(Movement.objects.filter(bucket='reserved').count(),1)
+        self.assertFalse(Decision.objects.exists())
+    def test_draft_updates_require_current_version_before_posting(self):
+        al=self.allocate(post=False)
+        old_version=al.version
+        al=s.save_allocation(self.p,{'order':self.order,'cmt':self.cmt},[{'lot':self.lot,'warehouse':self.wh,'rolls':4,'yards':D('120')}],pk=al.pk,version=old_version)
+        with self.assertRaises(ValidationError): s.save_allocation(self.p,{'order':self.order,'cmt':self.cmt},[],pk=al.pk,version=old_version)
         al=s.save_allocation(self.p,{'order':self.order,'cmt':self.cmt},[{'lot':self.lot,'warehouse':self.wh,'rolls':2,'yards':D('60')}],pk=al.pk,version=al.version)
-        s.submit_allocation(self.p,al.pk); s.decide_allocation(self.a,al.pk,'approved')
+        s.post_allocation(self.p,al.pk)
         self.assertEqual(s.balance(bucket='reserved'),(2,D('60')))
+        al.refresh_from_db()
+        with self.assertRaises(ValidationError): s.save_allocation(self.p,{'order':self.order,'cmt':self.cmt},[],pk=al.pk,version=al.version)
+    def test_multiline_allocation_post_rolls_back_every_reservation(self):
+        first_lot=self.posted()
+        receipt=s.save_receipt(self.p,{'vendor':self.vendor,'invoice':'SECOND LOT','warehouse':self.wh},[self.receipt_line(1,'30')])
+        s.post_receipt(self.p,receipt.pk)
+        second_lot=receipt.lines.first().lot
+        allocation=s.save_allocation(self.p,{'order':self.order,'cmt':self.cmt},[
+            {'lot':first_lot,'warehouse':self.wh,'rolls':10,'yards':D('300')},
+            {'lot':second_lot,'warehouse':self.wh,'rolls':2,'yards':D('60')},
+        ])
+        with self.assertRaises(ValidationError): s.post_allocation(self.p,allocation.pk)
+        allocation.refresh_from_db()
+        self.assertEqual(allocation.status,'draft')
+        self.assertEqual(s.balance(bucket='reserved'),(0,D('0')))
+        self.assertFalse(Movement.objects.filter(bucket='reserved').exists())
+    def test_allocation_http_post_and_retry_reserve_once(self):
+        allocation=self.allocate(post=False)
+        self.client.force_login(self.p)
+        token=str(uuid.uuid4())
+        path=f'/allocations/{allocation.pk}/action/allocate/'
+        self.assertEqual(self.client.get(path).status_code,200)
+        for _ in range(2):
+            self.assertEqual(self.client.post(path,{'token':token}).status_code,302)
+        allocation.refresh_from_db()
+        self.assertEqual(allocation.status,'allocated')
+        self.assertEqual(s.balance(bucket='reserved'),(10,D('300')))
+        self.assertFalse(Decision.objects.exists())
+    def test_purchasing_can_save_and_allocate_in_one_form_submission(self):
+        self.posted(); self.client.force_login(self.p)
+        data={'order':self.order.pk,'cmt':self.cmt.pk,'planned_date':self.today.isoformat(),
+              'intent':'allocate','token':str(uuid.uuid4()),'version':1,
+              'lines-TOTAL_FORMS':1,'lines-INITIAL_FORMS':0,'lines-MAX_NUM_FORMS':100,'lines-MIN_NUM_FORMS':0,
+              'lines-0-lot':self.lot.pk,'lines-0-warehouse':self.wh.pk,'lines-0-rolls':10,'lines-0-yards':'300.00'}
+        for _ in range(2):
+            response=self.client.post('/allocations/new/',data)
+            self.assertEqual(response.status_code,302)
+        self.assertEqual(Allocation.objects.count(),1)
+        self.assertEqual(Allocation.objects.get().status,'allocated')
+        self.assertEqual(s.balance(bucket='reserved'),(10,D('300')))
+        self.assertFalse(Decision.objects.exists())
+    def test_save_and_allocate_form_rolls_back_draft_if_stock_is_insufficient(self):
+        self.posted(); self.client.force_login(self.p)
+        data={'order':self.order.pk,'cmt':self.cmt.pk,'planned_date':self.today.isoformat(),
+              'intent':'allocate','token':str(uuid.uuid4()),'version':1,
+              'lines-TOTAL_FORMS':1,'lines-INITIAL_FORMS':0,'lines-MAX_NUM_FORMS':100,'lines-MIN_NUM_FORMS':0,
+              'lines-0-lot':self.lot.pk,'lines-0-warehouse':self.wh.pk,'lines-0-rolls':51,'lines-0-yards':'300.00'}
+        response=self.client.post('/allocations/new/',data)
+        self.assertEqual(response.status_code,400)
+        self.assertFalse(Allocation.objects.exists())
+        self.assertFalse(Movement.objects.filter(bucket='reserved').exists())
+    def test_approval_entry_points_are_retired_for_every_role(self):
+        allocation=self.allocate(post=False)
+        for actor in [self.p,self.director,self.admin]:
+            self.client.force_login(actor)
+            for path in ['/approvals/','/approvals/export/',
+                         f'/allocations/{allocation.pk}/action/submit/',
+                         f'/allocations/{allocation.pk}/action/decide/']:
+                with self.subTest(role=actor.role,path=path):
+                    self.assertEqual(self.client.get(path).status_code,404)
+                    self.assertEqual(self.client.post(path,{'token':str(uuid.uuid4()),'decision':'approved'}).status_code,404)
+        allocation.refresh_from_db()
+        self.assertEqual(allocation.status,'draft')
+        self.assertEqual(s.balance(bucket='reserved'),(0,D('0')))
+        self.assertFalse(Decision.objects.exists())
+    def test_director_and_admin_cannot_submit_operational_forms(self):
+        for actor in [self.director,self.admin]:
+            self.client.force_login(actor)
+            for path in ['/receipts/new/','/orders/new/','/allocations/new/','/masters/new/',
+                         '/progress/new/','/finished/new/','/warehouse/new/','/reconciliation/new/','/adjustment/']:
+                with self.subTest(role=actor.role,path=path):
+                    self.assertEqual(self.client.get(path).status_code,403)
+                    self.assertEqual(self.client.post(path,{'token':str(uuid.uuid4())}).status_code,403)
+    def test_account_role_choices_and_defaults_match_current_roles(self):
+        from .forms import AccountForm
+        form=AccountForm()
+        self.assertEqual(User().role,User.Role.DIRECTOR)
+        self.assertEqual(dict(form.fields['role'].choices),{
+            'purchasing':'Purchasing','director':'Direktur','admin':'Super Admin',
+        })
+        self.assertNotIn('can_adjust',form.fields)
+        self.assertNotIn('can_reopen',form.fields)
+        for role in ['approver','management']:
+            candidate=User(username=f'legacy-{role}',role=role)
+            with self.assertRaises(ValidationError): candidate.full_clean()
+    def test_database_rejects_retired_account_roles(self):
+        for role in ['approver','management']:
+            with self.subTest(role=role):
+                with self.assertRaises(IntegrityError):
+                    with transaction.atomic():
+                        User.objects.filter(pk=self.director.pk).update(role=role)
+        self.director.refresh_from_db()
+        self.assertEqual(self.director.role,'director')
+    def test_database_rejects_retired_allocation_states(self):
+        allocation=self.allocate(post=False)
+        for status in ['pending','approved','revision']:
+            with self.subTest(status=status):
+                with self.assertRaises(IntegrityError):
+                    with transaction.atomic():
+                        Allocation.objects.filter(pk=allocation.pk).update(status=status)
+        allocation.refresh_from_db()
+        self.assertEqual(allocation.status,'draft')
+        self.assertEqual(s.balance(bucket='reserved'),(0,D('0')))
     def test_cancellation_releases_only_remaining_reservation(self):
         al=self.allocate(); self.shipment(al,4,'120')
         s.cancel_allocation(self.p,al.pk,'Sisa dibatalkan')
@@ -225,12 +344,12 @@ class AcceptanceTests(Fixture,TestCase):
         with self.assertRaises(ValidationError): s.reconcile(self.p,self.report(order=self.order,cmt=self.cmt,lot=self.lot,action='waste',rolls=1,yards=D('30')))
         s.reconcile(self.p,self.report(order=self.order,cmt=self.cmt,lot=self.lot,action='waste',rolls=1,yards=D('30'),evidence=self.evidence))
         self.assertEqual(s.balance(bucket='cmt'),(7,D('210')))
-    def test_transfer_requires_approved_allocation(self):
+    def test_transfer_requires_posted_allocation(self):
         self.received_cmt(); target=self.new_order('PO TRANSFER')
         al=s.save_allocation(self.p,{'order':target,'source_order':self.order,'cmt':self.cmt},[{'lot':self.lot,'warehouse':self.cmt,'rolls':4,'yards':D('120')}])
         data=self.report(order=self.order,cmt=self.cmt,lot=self.lot,action='transfer',rolls=4,yards=D('120'),target_allocation=al.lines.first())
         with self.assertRaises(ValidationError): s.reconcile(self.p,data)
-        s.submit_allocation(self.p,al.pk); s.decide_allocation(self.a,al.pk,'approved')
+        s.post_allocation(self.p,al.pk)
         data['target_allocation']=al.lines.first()
         s.reconcile(self.p,data)
         self.assertEqual(s.balance(bucket='cmt',order=self.order),(6,D('180')))
@@ -257,16 +376,22 @@ class AcceptanceTests(Fixture,TestCase):
         s.reverse(self.p,'warehouse_receipt',wr.pk,'Salah laporan',self.evidence)
         self.assertEqual(s.totals(self.order)['good'],0)
         fs.refresh_from_db(); self.assertEqual(fs.status,'dispatched')
-    def test_adjustment_requires_special_permission_and_free_stock(self):
+    def test_purchasing_adjustment_requires_free_stock_without_special_flag(self):
         self.allocate(40,'1300')
         with self.assertRaises(ValidationError): s.adjust(self.p,self.lot,self.wh,'out',11,D('10'),'Koreksi',self.evidence)
-        self.p.can_adjust=False; self.p.save()
-        with self.assertRaises(PermissionDenied): s.adjust(self.p,self.lot,self.wh,'in',1,D('10'),'Koreksi',self.evidence)
+        self.assertFalse(self.p.can_adjust)
+        s.adjust(self.p,self.lot,self.wh,'in',1,D('10'),'Koreksi',self.evidence)
+        self.assertEqual(s.balance(bucket='physical'),(51,D('1675.50')))
+        for actor in [self.director,self.admin]:
+            with self.assertRaises(PermissionDenied): s.adjust(actor,self.lot,self.wh,'in',1,D('10'),'Koreksi',self.evidence)
     def test_closed_order_rejects_progress_and_reopen_audited(self):
         self.received_cmt(); self.finished(1072)
         s.reconcile(self.p,self.report(order=self.order,cmt=self.cmt,lot=self.lot,action='consumed',rolls=10,yards=D('300')))
         s.order_action(self.p,self.order.pk,'close')
         with self.assertRaises(ValidationError): s.save_progress(self.p,self.report(order=self.order,cmt=self.cmt,stage='qc',quantity=1,reject=0))
+        self.assertFalse(self.p.can_reopen)
+        for actor in [self.director,self.admin]:
+            with self.assertRaises(PermissionDenied): s.order_action(actor,self.order.pk,'reopen','Tidak berwenang')
         s.order_action(self.p,self.order.pk,'reopen','Perbaikan laporan')
         self.assertTrue(Audit.objects.filter(action='reopen').exists())
     def test_float_and_precision_rejected(self):
@@ -284,7 +409,9 @@ class AcceptanceTests(Fixture,TestCase):
         self.assertEqual(response.status_code,200)
         self.assertNotContains(response,f'<option value="{self.material.pk}">INESA')
     def test_ledger_audit_decisions_append_only_at_database(self):
-        self.allocate()
+        allocation=self.allocate()
+        # Existing approval history remains immutable after the workflow is retired.
+        Decision.objects.create(allocation=allocation,actor=self.p,decision='approved',version=1)
         for model in [Movement,Audit,Decision]:
             obj=model.objects.first()
             with self.assertRaises(ValidationError): obj.delete()
@@ -306,9 +433,9 @@ class AcceptanceTests(Fixture,TestCase):
         self.assertEqual(response.status_code,200)
     def test_all_views_render_for_roles(self):
         sj=self.shipment(); self.received_cmt(sj); fs,wr=self.finished(20)
-        for user in [self.p,self.a,self.m,self.admin]:
+        for user in [self.p,self.director,self.admin]:
             self.client.force_login(user)
-            for path in ['/','/receipts/','/orders/','/stock/','/movements/','/allocations/','/approvals/','/shipments/','/cmt/','/progress/','/finished/','/warehouse/','/reconciliation/','/exceptions/','/corrections/','/masters/','/reports/',f'/orders/{self.order.pk}/',f'/receipts/{self.receipt.pk}/',f'/allocations/{sj.allocation_id}/',f'/shipments/{sj.pk}/',f'/stock/{self.lot.pk}/',f'/finished/{fs.pk}/',f'/warehouse/{wr.pk}/']:
+            for path in ['/','/receipts/','/orders/','/stock/','/movements/','/allocations/','/shipments/','/cmt/','/progress/','/finished/','/warehouse/','/reconciliation/','/exceptions/','/corrections/','/masters/','/reports/',f'/orders/{self.order.pk}/',f'/receipts/{self.receipt.pk}/',f'/allocations/{sj.allocation_id}/',f'/shipments/{sj.pk}/',f'/stock/{self.lot.pk}/',f'/finished/{fs.pk}/',f'/warehouse/{wr.pk}/']:
                 with self.subTest(user=user.role,path=path): self.assertEqual(self.client.get(path).status_code,200)
         self.client.force_login(self.p)
         for path in ['/receipts/new/','/orders/new/','/allocations/new/','/masters/new/','/progress/new/','/finished/new/','/warehouse/new/','/reconciliation/new/','/adjustment/',f'/shipments/new/?allocation={sj.allocation_id}',f'/cmt/new/?line={sj.lines.first().pk}']:
@@ -327,7 +454,7 @@ class AcceptanceTests(Fixture,TestCase):
         with self.assertRaises(ValidationError): storage.upload(self.p,SimpleUploadedFile('x.exe',b'%PDF-1.7',content_type='application/pdf'))
     def test_account_permissions_and_admin_has_no_operational_access(self):
         with self.assertRaises(PermissionDenied): save_account(self.p,{},None)
-        self.client.force_login(self.m); self.assertEqual(self.client.get('/accounts/').status_code,403)
+        self.client.force_login(self.director); self.assertEqual(self.client.get('/accounts/').status_code,403)
         self.client.force_login(self.admin); self.assertEqual(self.client.get('/accounts/new/').status_code,200)
         with self.assertRaises(PermissionDenied): s.save_master(self.admin,{'kind':'vendor','code':'NO','name':'NO'})
     def test_stock_po_filter_does_not_multiply_shared_lot(self):
@@ -362,14 +489,14 @@ class AcceptanceTests(Fixture,TestCase):
 class ConcurrencyTests(Fixture,TransactionTestCase):
     reset_sequences=True
     def setUp(self): self.build()
-    def test_at04_competing_approvals_cannot_overreserve(self):
-        a1=self.allocate(30,'1000',approve=False)
-        a2=self.allocate(30,'1000',order=self.new_order('PO RACE'),approve=False)
+    def test_at04_competing_allocation_posts_cannot_overreserve(self):
+        a1=self.allocate(30,'1000',post=False)
+        a2=self.allocate(30,'1000',order=self.new_order('PO RACE'),post=False)
         barrier=threading.Barrier(2)
         def run(pk):
             try:
-                actor=User.objects.get(pk=self.a.pk); barrier.wait(timeout=10)
-                s.decide_allocation(actor,pk,'approved'); return 'ok'
+                actor=User.objects.get(pk=self.p.pk); barrier.wait(timeout=10)
+                s.post_allocation(actor,pk); return 'ok'
             except ValidationError: return 'insufficient'
             finally: connections.close_all()
         with ThreadPoolExecutor(max_workers=2) as pool:
@@ -385,3 +512,16 @@ class ConcurrencyTests(Fixture,TransactionTestCase):
             finally: connections.close_all()
         with ThreadPoolExecutor(max_workers=2) as pool: result=list(pool.map(run,[1,2]))
         self.assertEqual(result[0],result[1]); self.assertEqual(Movement.objects.count(),1)
+    def test_simultaneous_duplicate_allocation_post_is_idempotent(self):
+        allocation=self.allocate(post=False)
+        token=uuid.uuid4(); barrier=threading.Barrier(2)
+        def run(_):
+            try:
+                actor=User.objects.get(pk=self.p.pk); barrier.wait(timeout=10)
+                return s.post_allocation(actor,allocation.pk,key=token).pk
+            finally: connections.close_all()
+        with ThreadPoolExecutor(max_workers=2) as pool: result=list(pool.map(run,[1,2]))
+        self.assertEqual(result[0],result[1])
+        self.assertEqual(Movement.objects.filter(bucket='reserved').count(),1)
+        self.assertEqual(s.balance(bucket='reserved'),(10,D('300')))
+        self.assertFalse(Decision.objects.exists())

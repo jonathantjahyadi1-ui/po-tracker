@@ -1,3 +1,4 @@
+"""Typed operational inputs; references still resolve to validated database rows."""
 import hashlib
 import re
 
@@ -32,11 +33,13 @@ class TypedReference(forms.ModelChoiceField):
 
     def prepare_value(self, value):
         if hasattr(value, 'pk'):
+            if isinstance(value,Master) and self.queryset.filter(name__iexact=value.name).count()==1:
+                return value.name
             return reference_text(value)
         if value not in self.empty_values and str(value).isdigit():
             obj=self.queryset.filter(pk=value).first()
             if obj:
-                return reference_text(obj)
+                return self.prepare_value(obj)
         return value
 
     def to_python(self, value):
@@ -93,6 +96,8 @@ class TypedReference(forms.ModelChoiceField):
                     defaults={'name':text,'created_by':self.actor})
                 if not obj.active:
                     raise ValidationError('Data ini tidak aktif. Aktifkan kembali melalui Data master.')
+                if normalized(obj.name)!=normalized(text):
+                    raise ValidationError('Nama ini pernah diubah. Periksa nama dan kode pada Data master sebelum melanjutkan.')
                 if created:
                     services.audit(self.actor,'create_master',obj,after={'kind':obj.kind,'code':obj.code,'name':obj.name,'source':'manual_input'})
                 return obj
@@ -133,11 +138,13 @@ def manualize(form,actor=None):
             field=cls(queryset=old.queryset,**common)
             field.actor=actor
             field.widget=forms.TextInput(attrs={'placeholder':'Ketik nama atau kode' if old.queryset.model is Master else 'Ketik nomor / kode transaksi','autocomplete':'off'})
-            field.help_text=('Pisahkan beberapa nama dengan titik koma (;). ' if multiple else '')+'Ketik nama atau kode.'
+            hints={Master:'Ketik nama atau kode.',Order:'Ketik nomor PO yang sudah aktif.',Lot:'Ketik kode lot dari penerimaan yang sudah diposting.',Receipt:'Ketik nomor invoice atau INV-ID dari detail invoice yang sudah direversal.',FinishedShipment:'Ketik referensi HSL-00001 atau nomor surat jalan hasil.',AllocationLine:'Ketik kode lot atau BARIS-ID dari detail alokasi.'}
+            field.help_text=('Pisahkan beberapa nama dengan titik koma (;). ' if multiple else '')+hints.get(old.queryset.model,'Ketik nomor transaksi.')
             form.fields[name]=field
         elif isinstance(old,forms.ChoiceField):
             choices=list(old.choices)
             field=TypedChoice(choices=choices,**common)
+            field.error_messages['invalid_choice']='Isian tidak dikenali. Ketik salah satu istilah pada petunjuk kolom.'
             field.widget=forms.TextInput(attrs={'placeholder':'Ketik '+str(old.label).lower()})
             field.help_text='Ketik: '+', '.join(str(label) for key,label in choices if key)+'.'
             form.fields[name]=field

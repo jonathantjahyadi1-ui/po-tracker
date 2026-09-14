@@ -1,3 +1,8 @@
+"""Semua perubahan bisnis masuk melalui command atomik ini.
+
+Urutan penguncian: PO (urut PK), header, lot (urut PK). Ledger append-only.
+Kuantitas diwakili Decimal, tidak melewati float.
+"""
 import uuid
 from collections import defaultdict
 from decimal import Decimal, InvalidOperation

@@ -28,7 +28,7 @@ def access(request, kind, write=False):
     if kind=='accounts':
         services.require(request.user,['admin'])
     elif kind=='audit':
-        services.require(request.user,['admin','purchasing','approver'])
+        services.require(request.user,['admin','purchasing'])
     elif write:
         services.require(request.user,['purchasing'])
 
@@ -83,16 +83,16 @@ def dashboard(request):
         metrics.append({'label':label,'yards':q[1],'rolls':q[0],'link':link})
     orders=Order.objects.exclude(status__in=['closed','cancelled']).select_related('product').order_by('due_date','-id')[:7]
     order_rows=[{'order':o,**services.totals(o)} for o in orders]
-    pending=Allocation.objects.filter(status='pending').count()
+    draft_allocations=Allocation.objects.filter(status='draft').count()
     shipments=Shipment.objects.filter(status__in=['dispatched','partially_received']).count()
     exceptions=Discrepancy.objects.filter(resolved=False).count()
     overdue=Order.objects.exclude(status__in=['closed','cancelled','balanced']).filter(due_date__lt=timezone.localdate()).count()
     audit=Audit.objects.select_related('actor').all()
-    if request.user.role in ['purchasing','approver']:
+    if request.user.role=='purchasing':
         audit=audit.filter(actor=request.user)
-    elif request.user.role=='management':
+    elif request.user.role=='director':
         audit=Audit.objects.none()
-    return render(request,'dashboard.html',{'title':'Ringkasan','active':'dashboard','metrics':metrics,'order_rows':order_rows,'pending':pending,'shipment_count':shipments,'exception_count':exceptions,'overdue':overdue,'active_orders':Order.objects.exclude(status__in=['closed','cancelled','draft']).count(),'activities':audit[:5],'incoming':Receipt.objects.filter(status='posted',received_date__year=timezone.localdate().year,received_date__month=timezone.localdate().month).count()})
+    return render(request,'dashboard.html',{'title':'Ringkasan','active':'dashboard','metrics':metrics,'order_rows':order_rows,'draft_allocations':draft_allocations,'shipment_count':shipments,'exception_count':exceptions,'overdue':overdue,'active_orders':Order.objects.exclude(status__in=['closed','cancelled','draft']).count(),'activities':audit[:5],'incoming':Receipt.objects.filter(status='posted',received_date__year=timezone.localdate().year,received_date__month=timezone.localdate().month).count()})
 
 def list_filters(kind,request):
     form=forms.FilterForm(request.GET)
@@ -128,7 +128,7 @@ def listing(request,kind):
     else:
         page=Paginator(rows,25).get_page(request.GET.get('page'))
     params=request.GET.copy(); params.pop('page',None)
-    export_allowed=request.user.role in ['purchasing','management','admin']
+    export_allowed=request.user.role in ['purchasing','director','admin']
     create_url=''
     create_label='Tambah'
     if request.user.role=='purchasing' and kind in ['receipts','orders','allocations','masters','progress','finished','warehouse','reconciliation']:
@@ -149,7 +149,7 @@ def export(request,kind):
     if kind not in TITLES:
         raise Http404()
     access(request,kind)
-    services.require(request.user,['purchasing','management','admin'])
+    services.require(request.user,['purchasing','director','admin'])
     form=list_filters(kind,request)
     if not form.is_valid():
         return render(request,'error.html',{'title':'Filter tidak valid','error':form.errors},status=400)
@@ -224,13 +224,13 @@ def edit(request,kind,pk=None):
     obj=get_object_or_404(MODEL_MAP[kind],pk=pk) if pk else None
     if pk and kind not in ['masters','receipts','orders','allocations','shipments','accounts']:
         raise PermissionDenied('Transaksi posted tidak dapat diedit. Gunakan reversal.')
-    if pk and hasattr(obj,'status') and obj.status not in (['draft','revision'] if kind=='allocations' else ['draft']):
+    if pk and hasattr(obj,'status') and obj.status!='draft':
         raise PermissionDenied('Transaksi sudah terkunci. Gunakan reversal atau koreksi.')
     initial={}
     for field in ['order','cmt','shipment','kind']:
         if request.GET.get(field):
             initial[field]=request.GET[field]
-            form_kwargs={'actor':request.user} if kind!='accounts' else {}
+    form_kwargs={'actor':request.user} if kind!='accounts' else {}
     form=FORM_MAP[kind](request.POST or None,request.FILES or None,instance=obj,initial=initial,**form_kwargs)
     formset=None; allocation=None; cmt_line=None
     if kind in ['receipts','allocations','shipments']:
@@ -264,6 +264,8 @@ def edit(request,kind,pk=None):
                         saved=services.save_order(request.user,data,pk=pk,version=version,key=token)
                     elif kind=='allocations':
                         saved=services.save_allocation(request.user,data,line_data(formset),pk=pk,version=version,key=token)
+                        if request.POST.get('intent')=='allocate':
+                            saved=services.post_allocation(request.user,saved.pk,key=uuid.uuid5(token,'post-allocation'))
                     elif kind=='shipments':
                         saved=services.save_shipment(request.user,allocation,data,line_data(formset),pk=pk,version=version,key=token)
                     elif kind=='cmt':
@@ -278,7 +280,10 @@ def edit(request,kind,pk=None):
                         saved=services.reconcile(request.user,data,key=token)
                     else:
                         saved=save_account(request.user,data,form.cleaned_data.get('new_password'),pk=pk,key=token)
-                    messages.success(request,'Data tersimpan.' if kind in ['masters','accounts','receipts','orders','allocations','shipments'] else 'Laporan berhasil dicatat.')
+                    if kind=='allocations' and request.POST.get('intent')=='allocate':
+                        messages.success(request,'Bahan berhasil dialokasikan. Stok sudah direservasi.')
+                    else:
+                        messages.success(request,'Data tersimpan.' if kind in ['masters','accounts','receipts','orders','allocations','shipments'] else 'Laporan berhasil dicatat.')
                     return redirect(url(saved))
             except ValidationError as error:
                 form.add_error(None,error)
@@ -286,6 +291,10 @@ def edit(request,kind,pk=None):
                 form.add_error(None,'Nomor atau rincian duplikat. Periksa invoice, kode, PO, dan lot yang sama.')
     title=('Ubah ' if pk else 'Tambah ')+TITLES[kind].lower()
     subtitle='Periksa rincian, lalu simpan draft.' if kind in ['receipts','orders','allocations','shipments'] else 'Catat data sesuai laporan yang diterima.'
+    if kind=='allocations':
+        subtitle='Simpan draft atau langsung alokasikan bahan. Alokasi langsung mereservasi stok yang tersedia.'
+    elif kind=='accounts':
+        subtitle='Purchasing mengisi seluruh transaksi. Direktur memantau dan mengunduh laporan. Super Admin mengelola akun.'
     if allocation:
         subtitle=f'{allocation} · {allocation.order} · {allocation.cmt.name}'
     if cmt_line:
@@ -293,6 +302,7 @@ def edit(request,kind,pk=None):
         subtitle=f'{cmt_line.shipment.delivery_note} · {cmt_line.allocation_line.lot.code} · Sisa perjalanan {q[0]} roll / {number(q[1],2)} yard'
     response=render(request,'form.html',{'title':title,'active':kind,'kind':kind,'form':form,'formset':formset,'subtitle':subtitle,'back_url':url(obj) if obj else f'/{kind}/','submit_label':'Simpan draft' if kind in ['receipts','orders','allocations','shipments'] else 'Simpan','allocation_editor':kind=='allocations','existing_evidence':getattr(obj,'evidence',None)},status=400 if request.method=='POST' else 200)
     if request.method=='POST':
+        # Inline master records and their audits must not survive a failed transaction.
         transaction.set_rollback(True)
     return response
 
@@ -308,11 +318,10 @@ def save_account(actor,data,password,pk=None):
         raise ValidationError('Akun sendiri tidak dapat dinonaktifkan atau diturunkan rolenya.')
     if obj.pk and obj.role=='admin' and (data['role']!='admin' or not data['is_active']) and len([u for u in users if u.role=='admin' and u.is_active])<=1:
         raise ValidationError('Minimal satu Super Admin aktif harus tersedia.')
-    if data['role']!='purchasing' and (data['can_adjust'] or data['can_reopen']):
-        raise ValidationError('Hak khusus hanya dapat diberikan kepada Purchasing.')
     before={'role':obj.role,'active':obj.is_active} if obj.pk else {}
     for k,v in data.items():
         setattr(obj,k,v)
+    obj.can_adjust=obj.can_reopen=obj.role=='purchasing'
     if password:
         from django.contrib.auth.password_validation import validate_password
         validate_password(password,obj)
@@ -329,7 +338,7 @@ def action_url(kind,obj,action):
 
 @login_required
 def detail(request,kind,pk):
-    if kind not in MODEL_MAP or kind in ['audit','approvals']:
+    if kind not in MODEL_MAP or kind=='audit':
         raise Http404()
     access(request,kind)
     obj=get_object_or_404(MODEL_MAP[kind],pk=pk)
@@ -339,7 +348,7 @@ def detail(request,kind,pk):
         actions.append({'label':label,'url':action_url(kind,obj,action)})
     def direct(label,link):
         actions.append({'label':label,'url':link})
-    if (purchasing and kind in ['masters','receipts','orders','allocations','shipments'] and (not hasattr(obj,'status') or obj.status in ['draft','revision'])) or (kind=='accounts' and request.user.role=='admin'):
+    if (purchasing and kind in ['masters','receipts','orders','allocations','shipments'] and (not hasattr(obj,'status') or obj.status=='draft')) or (kind=='accounts' and request.user.role=='admin'):
         direct('Ubah',route('edit',args=[kind,pk]))
     if kind=='receipts':
         if purchasing and obj.status=='draft':
@@ -348,21 +357,21 @@ def detail(request,kind,pk):
             add('Reversal','reverse')
         sections.append({'title':'Rincian bahan','headers':['Bahan / warna','Lokasi','Roll','Yard','Lot'],'rows':[row(l,[cell(l.material.name,sub=l.color.name),cell(l.warehouse.name),cell(number(l.rolls),numeric=True),cell(number(l.yards,2),numeric=True),cell(l.lot.code,url(l.lot)) if hasattr(l,'lot') else cell('Belum diposting')]) for l in obj.lines.select_related('material','color','warehouse','lot')]})
     elif kind=='allocations':
-        if purchasing and obj.status in ['draft','revision']:
-            add('Ajukan persetujuan','submit')
-        if request.user.role=='approver' and obj.status=='pending':
-            add('Beri keputusan','decide')
-        if purchasing and obj.status in ['approved','partially_shipped'] and not obj.source_order_id:
+        if purchasing and obj.status=='draft':
+            add('Alokasikan bahan','allocate')
+        if purchasing and obj.status in ['allocated','partially_shipped'] and not obj.source_order_id:
             direct('Kirim bahan',f'/shipments/new/?allocation={obj.pk}')
-        if request.user.role in ['purchasing','approver'] and obj.status not in ['fully_shipped','rejected','cancelled']:
+        if purchasing and obj.status not in ['fully_shipped','rejected','cancelled']:
             add('Batalkan alokasi','cancel')
         rows=[]
         for l in obj.lines.select_related('lot','warehouse'):
             free=services.available(l.lot,l.warehouse,obj.source_order)
             rem=services.allocation_remaining(l)
-            rows.append(row(l,[cell(l.lot.code,url(l.lot)),cell(l.warehouse.name),cell(number(l.rolls),numeric=True),cell(number(l.yards,2),numeric=True),cell(number(free[1],2),sub=f'{free[0]} roll',numeric=True),cell(number(rem[1],2),sub=f'{rem[0]} roll',numeric=True)]))
-        sections.append({'title':'Bahan yang dialokasikan','headers':['Lot','Lokasi','Roll diminta','Yard diminta','Bebas saat ini','Sisa reservasi'],'rows':rows})
-        sections.append({'title':'Riwayat keputusan','headers':['Keputusan','Approver','Tanggal','Catatan'],'rows':[row(d,[cell(d.decision,status=True),cell(d.actor.username),cell(date(timezone.localtime(d.created_at))),cell(d.notes or '—')]) for d in obj.decisions.select_related('actor')]})
+            rows.append(row(l,[cell(l.lot.code,url(l.lot),sub=f'BARIS-{l.pk}'),cell(l.warehouse.name),cell(number(l.rolls),numeric=True),cell(number(l.yards,2),numeric=True),cell(number(free[1],2),sub=f'{free[0]} roll',numeric=True),cell(number(rem[1],2),sub=f'{rem[0]} roll',numeric=True)]))
+        sections.append({'title':'Bahan yang dialokasikan','headers':['Lot','Lokasi','Roll','Yard','Bebas saat ini','Sisa reservasi'],'rows':rows})
+        decisions=list(obj.decisions.select_related('actor'))
+        if decisions:
+            sections.append({'title':'Riwayat persetujuan lama','headers':['Keputusan','Pengguna','Tanggal','Catatan'],'rows':[row(d,[cell(d.decision,status=True),cell(d.actor.username),cell(date(timezone.localtime(d.created_at))),cell(d.notes or '—')]) for d in decisions]})
         sections.append({'title':'Pengiriman','headers':['Referensi','Surat jalan','Status'],'rows':[row(s,[cell(str(s),url(s)),cell(s.delivery_note),cell(s.status,status=True)]) for s in obj.shipments.all()]})
     elif kind=='shipments':
         if purchasing and obj.status=='draft':
@@ -372,7 +381,7 @@ def detail(request,kind,pk):
         rows=[]
         for l in obj.lines.select_related('allocation_line__lot'):
             rem=services.shipment_balance(l)
-            rows.append(row(l,[cell(l.lot.code,url(l.lot),sub=f'BARIS-{l.pk}'),cell(l.warehouse.name),cell(number(l.rolls),numeric=True),cell(number(l.yards,2),numeric=True),cell(number(free[1],2),sub=f'{free[0]} roll',numeric=True),cell(number(rem[1],2),sub=f'{rem[0]} roll',numeric=True)]))
+            rows.append(row(l,[cell(l.allocation_line.lot.code,url(l.allocation_line.lot)),cell(number(l.rolls),numeric=True),cell(number(l.yards,2),numeric=True),cell(number(rem[1],2),sub=f'{rem[0]} roll',numeric=True),cell('Catat penerimaan',f'/cmt/new/?line={l.pk}') if purchasing and obj.status in ['dispatched','partially_received','discrepancy'] else cell('—')]))
         sections.append({'title':'Rincian pengiriman','headers':['Lot','Roll dikirim','Yard dikirim','Sisa perjalanan','Laporan CMT'],'rows':rows})
         sections.append({'title':'Penerimaan CMT','headers':['Tanggal','PIC','Roll','Yard','Kondisi'],'rows':[row(r,[cell(date(r.report_date),url(r)),cell(r.pic),cell(number(r.rolls),numeric=True),cell(number(r.yards,2),numeric=True),cell('reversed' if r.reversed else r.get_condition_display(),status=True)]) for r in CMTReceipt.objects.filter(shipment_line__shipment=obj)]})
     elif kind=='orders':
@@ -392,7 +401,7 @@ def detail(request,kind,pk):
                 add('Batalkan PO','cancel')
             elif not obj.archived:
                 add('Arsipkan','archive')
-            if obj.status=='closed' and request.user.can_reopen:
+            if obj.status=='closed':
                 add('Buka kembali','reopen')
         for report_kind in ['allocations','shipments','progress','finished','warehouse','reconciliation']:
             headers,rows=dataset(report_kind,{'order':obj},request.user)
@@ -403,7 +412,7 @@ def detail(request,kind,pk):
     elif kind=='stock':
         headers,rows=dataset('movements',{},request.user,{'lot':obj.pk})
         sections.append({'title':'Kartu stok lot','headers':headers,'rows':rows})
-        if purchasing and request.user.can_adjust:
+        if purchasing:
             direct('Adjustment',f'/adjustment/?lot={obj.pk}')
     elif kind=='finished':
         if purchasing and obj.status!='received' and obj.order.status not in ['closed','cancelled']:
@@ -414,7 +423,9 @@ def detail(request,kind,pk):
     elif kind in ['cmt','warehouse','reconciliation'] and purchasing and not obj.reversed:
         add('Reversal','reverse')
     fields=[]
-    omit=['id','password','is_staff','is_superuser','version','created_at','updated_at','created_by','evidence','last_login','date_joined','over_resolved']
+    if kind=='receipts':
+        fields.append(('Referensi invoice',cell(f'INV-{obj.pk}')))
+    omit=['id','password','is_staff','is_superuser','can_adjust','can_reopen','version','created_at','updated_at','created_by','evidence','last_login','date_joined','over_resolved']
     for f in obj._meta.fields:
         if f.name in omit:
             continue
@@ -436,23 +447,22 @@ def detail(request,kind,pk):
             fields.append((label,cell(value)))
     if kind=='orders':
         fields.append(('CMT',cell(', '.join(o.name for o in obj.cmts.all()) or 'Semua CMT aktif')))
-    return render(request,'detail.html',{'title':str(obj) if kind in ['receipts','orders','allocations','shipments','finished','stock','masters'] else TITLES[kind],'active':kind,'kind':kind,'object':obj,'fields':fields,'actions':actions,'sections':sections,'metrics':metrics,'evidence':getattr(obj,'evidence',None),'events':Audit.objects.filter(entity=type(obj).__name__,object_id=str(pk)).select_related('actor')[:20] if request.user.role in ['purchasing','approver','admin'] else [],'back_url':f'/{kind}/'})
+    return render(request,'detail.html',{'title':str(obj) if kind in ['receipts','orders','allocations','shipments','finished','stock','masters'] else TITLES[kind],'active':kind,'kind':kind,'object':obj,'fields':fields,'actions':actions,'sections':sections,'metrics':metrics,'evidence':getattr(obj,'evidence',None),'events':Audit.objects.filter(entity=type(obj).__name__,object_id=str(pk)).select_related('actor')[:20] if request.user.role in ['purchasing','admin'] else [],'back_url':f'/{kind}/'})
 
-ACTION_LABELS={'post':'Posting penerimaan','dispatch':'Posting pengiriman','submit':'Ajukan persetujuan','decide':'Keputusan alokasi','cancel':'Batalkan transaksi','reverse':'Reversal transaksi','activate':'Aktifkan PO','close':'Tutup PO','reopen':'Buka kembali PO','resolve_over':'Selesaikan kelebihan hasil','archive':'Arsipkan PO','resolve':'Selesaikan selisih'}
+ACTION_LABELS={'post':'Posting penerimaan','dispatch':'Posting pengiriman','allocate':'Alokasikan bahan','cancel':'Batalkan transaksi','reverse':'Reversal transaksi','activate':'Aktifkan PO','close':'Tutup PO','reopen':'Buka kembali PO','resolve_over':'Selesaikan kelebihan hasil','archive':'Arsipkan PO','resolve':'Selesaikan selisih'}
 
 @login_required
 def action(request,kind,pk,action):
-    allowed={'receipts':['post','cancel','reverse'],'orders':['activate','cancel','close','reopen','resolve_over','archive'],'allocations':['submit','decide','cancel'],'shipments':['dispatch','reverse'],'cmt':['reverse'],'warehouse':['reverse'],'reconciliation':['reverse'],'exceptions':['resolve']}
+    allowed={'receipts':['post','cancel','reverse'],'orders':['activate','cancel','close','reopen','resolve_over','archive'],'allocations':['allocate','cancel'],'shipments':['dispatch','reverse'],'cmt':['reverse'],'warehouse':['reverse'],'reconciliation':['reverse'],'exceptions':['resolve']}
     if action not in allowed.get(kind,[]):
         raise Http404()
-    roles=['approver'] if action=='decide' else (['purchasing','approver'] if kind=='allocations' and action=='cancel' else ['purchasing'])
-    services.require(request.user,roles)
+    services.require(request.user,['purchasing'])
     obj=get_object_or_404(MODEL_MAP[kind],pk=pk)
-    form_class=forms.DecisionForm if action=='decide' else (forms.ResolutionForm if action=='resolve' else forms.ActionForm)
+    form_class=forms.ResolutionForm if action=='resolve' else forms.ActionForm
     form=form_class(request.POST or None,request.FILES or None)
-    if action in ['post','dispatch','submit','activate','close','archive']:
+    if action in ['post','dispatch','allocate','activate','close','archive']:
         form.fields.pop('reason'); form.fields.pop('attachment')
-    impact={'post':'Posting menambah stok fisik sesuai seluruh rincian penerimaan. Data posted dikunci.','dispatch':'Posting mengurangi stok fisik dan reservasi; bahan masuk stok dalam perjalanan.','submit':'Rincian alokasi dikunci dan dikirim ke antrean Approver. Stok belum direservasi.','decide':'Persetujuan mengecek ulang stok bebas dan membentuk reservasi. Stok fisik tetap.','cancel':'Transaksi dibatalkan. Sisa reservasi alokasi dilepas; riwayat tetap tersimpan.','reverse':'Dampak transaksi dibalik dengan pergerakan lawan. Reversal ditolak bila stok sudah dipakai.','close':'PO dikunci setelah target good, penerimaan, dan rekonsiliasi bahan selesai.','resolve':'Selisih diselesaikan dengan bukti. Kehilangan mengurangi sisa perjalanan, tanpa menambah good.','resolve_over':'Kelebihan hasil tetap ditampilkan. Alasan ini mengizinkan penutupan setelah syarat lain selesai.','archive':'PO tersimpan di arsip dan tetap dapat ditelusuri.','activate':'PO dapat digunakan untuk alokasi dan produksi.','reopen':'PO dapat menerima transaksi lagi. Alasan dan pengguna akan dicatat.'}[action]
+    impact={'post':'Posting menambah stok fisik sesuai seluruh rincian penerimaan. Data posted dikunci.','dispatch':'Posting mengurangi stok fisik dan reservasi; bahan masuk stok dalam perjalanan.','allocate':'Sistem memeriksa stok bebas dan langsung mereservasi bahan untuk PO ini. Rincian alokasi dikunci setelah berhasil. Stok fisik tetap sampai pengiriman dicatat.','cancel':'Transaksi dibatalkan. Sisa reservasi alokasi dilepas; riwayat tetap tersimpan.','reverse':'Dampak transaksi dibalik dengan pergerakan lawan. Reversal ditolak bila stok sudah dipakai.','close':'PO dikunci setelah target good, penerimaan, dan rekonsiliasi bahan selesai.','resolve':'Selisih diselesaikan dengan bukti. Kehilangan mengurangi sisa perjalanan, tanpa menambah good.','resolve_over':'Kelebihan hasil tetap ditampilkan. Alasan ini mengizinkan penutupan setelah syarat lain selesai.','archive':'PO tersimpan di arsip dan tetap dapat ditelusuri.','activate':'PO dapat digunakan untuk alokasi dan produksi.','reopen':'PO dapat menerima transaksi lagi. Alasan dan pengguna akan dicatat.'}[action]
     if request.method=='POST' and form.is_valid():
         try:
             with transaction.atomic():
@@ -466,10 +476,8 @@ def action(request,kind,pk,action):
                 elif kind=='orders':
                     services.order_action(request.user,pk,action,reason,evidence,key=token)
                 elif kind=='allocations':
-                    if action=='submit':
-                        services.submit_allocation(request.user,pk,key=token)
-                    elif action=='decide':
-                        services.decide_allocation(request.user,pk,data['decision'],reason,key=token)
+                    if action=='allocate':
+                        services.post_allocation(request.user,pk,key=token)
                     else:
                         services.cancel_allocation(request.user,pk,reason,key=token)
                 elif kind=='shipments':
@@ -491,8 +499,6 @@ def action(request,kind,pk,action):
 @login_required
 def adjustment(request):
     services.require(request.user,['purchasing'])
-    if not request.user.can_adjust:
-        raise PermissionDenied('Hak khusus adjustment diperlukan.')
     form=forms.AdjustmentForm(request.POST or None,request.FILES or None,initial={'lot':request.GET.get('lot')})
     if request.method=='POST' and form.is_valid():
         try:
