@@ -81,8 +81,9 @@ def dashboard(request):
     for label,q,bucket in buckets:
         link='/stock/?scope=warehouse'+('&status='+bucket if bucket else '') if bucket in ['physical','reserved',''] else '/stock/?status='+bucket
         metrics.append({'label':label,'yards':q[1],'rolls':q[0],'link':link})
-    orders=Order.objects.exclude(status__in=['closed','cancelled']).select_related('product').order_by('due_date','-id')[:7]
-    order_rows=[{'order':o,**services.totals(o)} for o in orders]
+    orders=list(Order.objects.exclude(status__in=['closed','cancelled']).select_related('product').order_by('due_date','-id')[:7])
+    order_totals=services.totals_many(orders)
+    order_rows=[{'order':o,**order_totals[o.pk]} for o in orders]
     draft_allocations=Allocation.objects.filter(status='draft').count()
     shipments=Shipment.objects.filter(status__in=['dispatched','partially_received']).count()
     exceptions=Discrepancy.objects.filter(resolved=False).count()

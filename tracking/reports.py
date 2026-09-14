@@ -3,7 +3,7 @@ from decimal import Decimal
 from django.db.models import Q, Sum
 from .models import *
 from .presentation import cell, row, url, date, number, STATUS, ACTION_LABELS, ENTITY_LABELS, ROLE_LABELS
-from .services import totals
+from .services import totals_many
 
 TITLES={'receipts':'Penerimaan bahan','stock':'Stok bahan','movements':'Kartu stok','orders':'PO produksi','allocations':'Alokasi bahan','shipments':'Pengiriman bahan','cmt':'Penerimaan CMT','progress':'Progres produksi','finished':'Pengiriman hasil','warehouse':'Penerimaan gudang','reconciliation':'Sisa bahan','exceptions':'Selisih & resolusi','corrections':'Koreksi & reversal','audit':'Audit log','masters':'Data master','accounts':'Akun pengguna'}
 MODEL_MAP={'receipts':Receipt,'orders':Order,'allocations':Allocation,'shipments':Shipment,'cmt':CMTReceipt,'progress':Progress,'finished':FinishedShipment,'warehouse':WarehouseReceipt,'reconciliation':Reconciliation,'exceptions':Discrepancy,'corrections':Correction,'audit':Audit,'masters':Master,'accounts':User,'stock':Lot}
@@ -124,22 +124,28 @@ def dataset(kind,filters,user,extra=None):
         extra['_total']=paginator.count
         extra['_page_number']=page.number
         qs=page.object_list
+    qs=list(qs)
+    order_totals=totals_many(qs) if kind=='orders' else {}
+    quantities={}
+    if kind in ['receipts','allocations','shipments']:
+        line_model,parent={'receipts':(ReceiptLine,'receipt_id'),'allocations':(AllocationLine,'allocation_id'),'shipments':(ShipmentLine,'shipment_id')}[kind]
+        quantities={item[parent]:item for item in line_model.objects.filter(**{parent+'__in':[o.pk for o in qs]}).values(parent).annotate(r=Sum('rolls'),y=Sum('yards'))}
     result=[]; headers=[]
     for o in qs:
         if kind=='receipts':
-            q=o.lines.aggregate(r=Sum('rolls'),y=Sum('yards'))
+            q=quantities.get(o.pk,{'r':0,'y':ZERO})
             headers=['Invoice','Vendor','Diterima','Roll','Yard','Total invoice','Status']
             cells=[cell(o.invoice,url(o),sub=o.delivery_note or '—'),cell(o.vendor.name),cell(date(o.received_date)),cell(number(q['r'] or 0),numeric=True),cell(number(q['y'] or ZERO,2),numeric=True),cell(number(o.invoice_total,2),numeric=True),cell(o.status,status=True)]
         elif kind=='orders':
-            t=totals(o)
+            t=order_totals[o.pk]
             headers=['PO / produk','Target','Good diterima','Reject','Sisa target','Kelebihan','Target selesai','Status']
             cells=[cell(o.number,url(o),sub=o.product.name),cell(number(o.target),numeric=True),cell(number(t['good']),numeric=True),cell(number(t['reject']),numeric=True),cell(number(t['remaining']),numeric=True),cell(number(t['over']),numeric=True),cell(date(o.due_date)),cell(o.status,status=True)]
         elif kind=='allocations':
-            q=o.lines.aggregate(r=Sum('rolls'),y=Sum('yards'))
+            q=quantities.get(o.pk,{'r':0,'y':ZERO})
             headers=['Alokasi','PO','CMT','Roll','Yard','Rencana kirim','Status']
             cells=[cell(str(o),url(o),sub='Transfer' if o.source_order_id else 'Gudang → CMT'),cell(o.order.number,url(o.order)),cell(o.cmt.name),cell(number(q['r'] or 0),numeric=True),cell(number(q['y'] or ZERO,2),numeric=True),cell(date(o.planned_date)),cell(o.status,status=True)]
         elif kind=='shipments':
-            q=o.lines.aggregate(r=Sum('rolls'),y=Sum('yards'))
+            q=quantities.get(o.pk,{'r':0,'y':ZERO})
             headers=['Pengiriman','PO','CMT','Tanggal kirim','Roll','Yard','Status']
             cells=[cell(o.delivery_note,url(o),sub=str(o)),cell(o.allocation.order.number,url(o.allocation.order)),cell(o.allocation.cmt.name),cell(date(o.sent_date)),cell(number(q['r'] or 0),numeric=True),cell(number(q['y'] or ZERO,2),numeric=True),cell(o.status,status=True)]
         elif kind=='cmt':

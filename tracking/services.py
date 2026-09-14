@@ -1,8 +1,3 @@
-"""Semua perubahan bisnis masuk melalui command atomik ini.
-
-Urutan penguncian: PO (urut PK), header, lot (urut PK). Ledger append-only.
-Kuantitas diwakili Decimal, tidak melewati float.
-"""
 import uuid
 from collections import defaultdict
 from decimal import Decimal, InvalidOperation
@@ -116,8 +111,17 @@ def transition(actor, obj, status, action, notes=''):
 
 def totals(order):
     data = WarehouseReceipt.objects.filter(shipment__order=order, reversed=False).aggregate(good=Sum('good'), reject=Sum('reject'))
+    return result_totals(order,data)
+
+def result_totals(order,data):
     good, reject = data['good'] or 0, data['reject'] or 0
     return {'good': good, 'reject': reject, 'remaining': max(order.target - good, 0), 'over': max(good - order.target, 0), 'percent': min(good * 100 // order.target, 100)}
+
+def totals_many(orders):
+    orders=list(orders)
+    grouped=WarehouseReceipt.objects.filter(shipment__order_id__in=[o.pk for o in orders],reversed=False).values('shipment__order_id').annotate(good=Sum('good'),reject=Sum('reject'))
+    values={item['shipment__order_id']:item for item in grouped}
+    return {o.pk:result_totals(o,values.get(o.pk,{'good':0,'reject':0})) for o in orders}
 
 def unresolved(order):
     if order.transfer_allocations.filter(status='draft').exists():
