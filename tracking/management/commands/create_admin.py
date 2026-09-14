@@ -17,4 +17,4 @@ class Command(BaseCommand):
         obj=User(username=opts['username'],email=opts['email'],role='admin')
         validate_password(password,obj); obj.set_password(password); obj.full_clean(); obj.save()
         Audit.objects.create(actor=obj,role=obj.role,action='bootstrap_admin',entity='User',object_id=str(obj.pk))
-        self.stdout.write('Akun Super Admin dibuat. Masuk untuk membuat akun Purchasing dan Approver.')
+        self.stdout.write('Akun Super Admin dibuat. Masuk untuk membuat akun Purchasing dan Direktur.')

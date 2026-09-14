@@ -1,8 +1,3 @@
-"""Semua perubahan bisnis masuk melalui command atomik ini.
-
-Urutan penguncian: PO (urut PK), header, lot (urut PK). Ledger append-only.
-Kuantitas diwakili Decimal, tidak melewati float.
-"""
 import uuid
 from collections import defaultdict
 from decimal import Decimal, InvalidOperation
@@ -15,7 +10,6 @@ from .middleware import request_id
 from .models import *
 
 P = User.Role.PURCHASING
-A = User.Role.APPROVER
 
 def require(actor, roles):
     current = User.objects.get(pk=actor.pk)
@@ -121,13 +115,13 @@ def totals(order):
     return {'good': good, 'reject': reject, 'remaining': max(order.target - good, 0), 'over': max(good - order.target, 0), 'percent': min(good * 100 // order.target, 100)}
 
 def unresolved(order):
-    if order.transfer_allocations.filter(status__in=['draft','pending','revision']).exists():
+    if order.transfer_allocations.filter(status='draft').exists():
         return True
     if Movement.objects.filter(order=order).exists():
         for bucket in ['reserved', 'transit', 'cmt']:
             if balance(bucket=bucket, order=order) != (0, ZERO):
                 return True
-    return Discrepancy.objects.filter(Q(shipment_line__shipment__allocation__order=order) | Q(finished_shipment__order=order), resolved=False).exists() or FinishedShipment.objects.filter(order=order, status__in=['dispatched', 'partially_received', 'discrepancy']).exists() or Allocation.objects.filter(order=order, status__in=['draft', 'pending', 'revision']).exists()
+    return Discrepancy.objects.filter(Q(shipment_line__shipment__allocation__order=order) | Q(finished_shipment__order=order), resolved=False).exists() or FinishedShipment.objects.filter(order=order, status__in=['dispatched', 'partially_received', 'discrepancy']).exists() or Allocation.objects.filter(order=order, status='draft').exists()
 
 def refresh_order(actor, order):
     if order.status in ['closed', 'cancelled', 'draft']:
@@ -139,7 +133,7 @@ def refresh_order(actor, order):
         status = 'partial_delivery'
     elif balance(bucket='cmt', order=order) != (0, ZERO) or order.progress_updates.exists() or order.finished_shipments.exists():
         status = 'in_production'
-    elif order.allocations.filter(status__in=['approved', 'partially_shipped', 'fully_shipped']).exists():
+    elif order.allocations.filter(status__in=['allocated', 'partially_shipped', 'fully_shipped']).exists():
         status = 'material_allocated'
     else:
         status = 'waiting_material'
@@ -257,8 +251,6 @@ def order_action(actor, pk, action, reason='', evidence=None):
             raise ValidationError('Target, penerimaan, reservasi, selisih, atau rekonsiliasi bahan belum selesai.')
         transition(actor, obj, 'closed', action)
     elif action == 'reopen':
-        if not actor.can_reopen:
-            raise PermissionDenied('Hak khusus buka kembali PO diperlukan.')
         if obj.status != 'closed' or not reason.strip():
             raise ValidationError('PO harus sudah ditutup dan alasan wajib diisi.')
         obj.archived = False
@@ -302,9 +294,9 @@ def allocation_remaining(line):
 def save_allocation(actor, data, lines, pk=None, version=None):
     lock_orders(data['order'].pk, data.get('source_order').pk if data.get('source_order') else None)
     obj = Allocation.objects.select_for_update().get(pk=pk) if pk else Allocation(created_by=actor)
-    if pk and (obj.status not in ['draft','revision'] or obj.version != version):
-        raise ValidationError('Alokasi harus draft/revisi dan menggunakan versi terbaru.')
-    if data['order'].status == 'draft':
+    if pk and (obj.status != 'draft' or obj.version != version):
+        raise ValidationError('Alokasi harus draft dan menggunakan versi terbaru.')
+    if Order.objects.get(pk=data['order'].pk).status == 'draft':
         raise ValidationError('Aktifkan PO sebelum membuat alokasi.')
     active(data['cmt'], 'cmt')
     if data['order'].cmts.exists() and not data['order'].cmts.filter(pk=data['cmt'].pk).exists():
@@ -330,37 +322,30 @@ def save_allocation(actor, data, lines, pk=None, version=None):
     return obj
 
 @command([P], Allocation)
-def submit_allocation(actor, pk):
-    ref = Allocation.objects.get(pk=pk)
-    lock_orders(ref.order_id, ref.source_order_id)
-    obj = Allocation.objects.select_for_update().get(pk=pk)
-    if obj.status not in ['draft','revision'] or not obj.lines.exists():
-        raise ValidationError('Alokasi harus draft/revisi dengan minimal satu lot.')
-    lock_lots(obj.lines.values_list('lot_id',flat=True))
-    for line in obj.lines.select_related('lot','warehouse'):
-        enough(available(line.lot,line.warehouse,obj.source_order), (line.rolls,line.yards), line.lot.code)
-    transition(actor,obj,'pending','submit')
-    return obj
-
-@command([A], Allocation)
-def decide_allocation(actor, pk, decision, notes=''):
+def post_allocation(actor, pk):
     ref = Allocation.objects.get(pk=pk)
     orders = lock_orders(ref.order_id, ref.source_order_id)
     obj = Allocation.objects.select_for_update().get(pk=pk)
-    if obj.status != 'pending':
-        raise ValidationError('Alokasi sudah diputuskan atau belum diajukan.')
-    if decision not in ['approved','rejected','revision']:
-        raise ValidationError('Keputusan tidak valid.')
-    if decision != 'approved' and not notes.strip():
-        raise ValidationError('Catatan wajib untuk penolakan atau revisi.')
+    if obj.status != 'draft' or not obj.lines.exists():
+        raise ValidationError('Alokasi harus draft dengan minimal satu lot.')
+    if any(order.status == 'draft' for order in orders.values()):
+        raise ValidationError('Aktifkan PO sebelum mengalokasikan bahan.')
+    active(obj.cmt, 'cmt')
+    if obj.order.cmts.exists() and not obj.order.cmts.filter(pk=obj.cmt_id).exists():
+        raise ValidationError('CMT tidak terdaftar pada PO tujuan.')
+    if obj.source_order_id == obj.order_id:
+        raise ValidationError('PO sumber dan tujuan transfer harus berbeda.')
     lock_lots(obj.lines.values_list('lot_id',flat=True))
-    if decision == 'approved':
-        active(obj.cmt,'cmt')
-        for line in obj.lines.select_related('lot','warehouse'):
-            enough(available(line.lot,line.warehouse,obj.source_order), (line.rolls,line.yards), line.lot.code)
-            move(actor,line.lot,'reserved',line.warehouse,(line.rolls,line.yards),'reserve',order=obj.source_order or obj.order,allocation=obj)
-    Decision.objects.create(allocation=obj, actor=actor, decision=decision, notes=notes, version=obj.version)
-    transition(actor,obj,decision,'decision',notes)
+    for line in obj.lines.select_related('lot','warehouse'):
+        if obj.source_order_id:
+            if line.warehouse_id != obj.cmt_id:
+                raise ValidationError('Sumber transfer harus lokasi CMT yang sama.')
+        else:
+            active(line.warehouse, 'warehouse')
+        quantity = qty(line.rolls, line.yards)
+        enough(available(line.lot,line.warehouse,obj.source_order), quantity, line.lot.code)
+        move(actor,line.lot,'reserved',line.warehouse,quantity,'reserve',order=obj.source_order or obj.order,allocation=obj)
+    transition(actor,obj,'allocated','allocate')
     for order in orders.values():
         refresh_order(actor,order)
     return obj
@@ -371,15 +356,13 @@ def release(actor, obj):
         if q != (0,ZERO):
             move(actor,line.lot,'reserved',line.warehouse,q,'release',order=obj.source_order or obj.order,allocation=obj,sign=-1)
 
-@command([P,A], Allocation)
+@command([P], Allocation)
 def cancel_allocation(actor, pk, reason):
     ref = Allocation.objects.get(pk=pk)
     orders = lock_orders(ref.order_id,ref.source_order_id)
     obj = Allocation.objects.select_for_update().get(pk=pk)
     if not reason.strip() or obj.status in ['cancelled','rejected','fully_shipped']:
         raise ValidationError('Alasan wajib diisi dan alokasi harus masih terbuka.')
-    if actor.role == A and obj.status not in ['approved','partially_shipped']:
-        raise PermissionDenied('Approver hanya dapat membatalkan reservasi disetujui.')
     lock_lots(obj.lines.values_list('lot_id',flat=True))
     release(actor,obj)
     transition(actor,obj,'cancelled','cancel',reason)
@@ -394,7 +377,7 @@ def refresh_allocation(actor, obj):
     if all(q == (0,ZERO) for q in remaining):
         status = 'fully_shipped'
     elif all(q == (line.rolls,line.yards) for q,line in zip(remaining,obj.lines.all())):
-        status = 'approved'
+        status = 'allocated'
     else:
         status = 'partially_shipped'
     if obj.status != status:
@@ -404,8 +387,8 @@ def refresh_allocation(actor, obj):
 def save_shipment(actor, allocation, data, lines, pk=None, version=None):
     lock_orders(allocation.order_id)
     allocation = Allocation.objects.select_for_update().get(pk=allocation.pk)
-    if allocation.status not in ['approved','partially_shipped'] or allocation.source_order_id:
-        raise ValidationError('Gunakan alokasi gudang yang sudah disetujui dan masih memiliki sisa.')
+    if allocation.status not in ['allocated','partially_shipped'] or allocation.source_order_id:
+        raise ValidationError('Gunakan alokasi gudang aktif yang masih memiliki sisa.')
     obj = Shipment.objects.select_for_update().get(pk=pk) if pk else Shipment(created_by=actor,allocation=allocation)
     if pk and (obj.status != 'draft' or obj.version != version or obj.allocation_id != allocation.pk):
         raise ValidationError('Hanya draft versi terbaru dapat diubah.')
@@ -432,7 +415,7 @@ def dispatch(actor, pk):
     order = lock_orders(ref.allocation.order_id)[ref.allocation.order_id]
     allocation = Allocation.objects.select_for_update().get(pk=ref.allocation_id)
     obj = Shipment.objects.select_for_update().get(pk=pk)
-    if obj.status != 'draft' or allocation.status not in ['approved','partially_shipped'] or not obj.lines.exists():
+    if obj.status != 'draft' or allocation.status not in ['allocated','partially_shipped'] or not obj.lines.exists():
         raise ValidationError('Pengiriman harus draft dengan alokasi dan rincian yang valid.')
     lock_lots(obj.lines.values_list('allocation_line__lot_id',flat=True))
     for line in obj.lines.select_related('allocation_line__lot','allocation_line__warehouse'):
@@ -497,8 +480,8 @@ def save_progress(actor, data):
     if order.status == 'draft':
         raise ValidationError('Aktifkan PO terlebih dahulu.')
     active(data['cmt'],'cmt')
-    if not order.allocations.filter(cmt=data['cmt'],status__in=['approved','partially_shipped','fully_shipped','cancelled']).exists():
-        raise ValidationError('CMT belum memiliki alokasi disetujui untuk PO ini.')
+    if not order.allocations.filter(cmt=data['cmt'],status__in=['allocated','partially_shipped','fully_shipped','cancelled']).exists():
+        raise ValidationError('CMT belum memiliki alokasi aktif untuk PO ini.')
     report(data)
     if data['reject'] > data['quantity']:
         raise ValidationError('Reject tidak boleh melebihi jumlah progres.')
@@ -516,8 +499,8 @@ def send_finished(actor, data):
         raise ValidationError('Aktifkan PO terlebih dahulu.')
     active(data['cmt'],'cmt')
     active(data['warehouse'],'warehouse')
-    if not order.allocations.filter(cmt=data['cmt'],status__in=['approved','partially_shipped','fully_shipped','cancelled']).exists():
-        raise ValidationError('CMT belum memiliki alokasi disetujui untuk PO ini.')
+    if not order.allocations.filter(cmt=data['cmt'],status__in=['allocated','partially_shipped','fully_shipped','cancelled']).exists():
+        raise ValidationError('CMT belum memiliki alokasi aktif untuk PO ini.')
     report(data)
     obj = FinishedShipment(created_by=actor,**data)
     obj.full_clean()
@@ -584,8 +567,8 @@ def reconcile(actor, data):
     if action in ['waste','damaged','transfer','returned'] and not data.get('notes','').strip():
         raise ValidationError('Alasan tindakan wajib dicatat.')
     if action == 'transfer':
-        if not target or target.allocation.source_order_id != order.pk or target.lot_id != data['lot'].pk or target.allocation.cmt_id != data['cmt'].pk or target.allocation.status not in ['approved','partially_shipped']:
-            raise ValidationError('Transfer harus memakai alokasi transfer baru yang disetujui untuk lot, PO sumber, dan CMT yang sama.')
+        if not target or target.allocation.source_order_id != order.pk or target.lot_id != data['lot'].pk or target.allocation.cmt_id != data['cmt'].pk or target.allocation.status not in ['allocated','partially_shipped']:
+            raise ValidationError('Transfer harus memakai alokasi transfer aktif untuk lot, PO sumber, dan CMT yang sama.')
         Allocation.objects.select_for_update().get(pk=target.allocation_id)
     lock_lots([data['lot'].pk])
     enough(balance(data['lot'],'cmt',data['cmt'],order),q,'Bahan di CMT')
@@ -685,8 +668,6 @@ def reverse(actor, kind, pk, reason, evidence):
 
 @command([P], Correction)
 def adjust(actor, lot, warehouse, direction, rolls, yards, reason, evidence):
-    if not actor.can_adjust:
-        raise PermissionDenied('Hak khusus adjustment diperlukan.')
     if direction not in ['in','out'] or not reason.strip():
         raise ValidationError('Arah adjustment dan alasan wajib diisi.')
     active(warehouse,'warehouse')
@@ -715,8 +696,6 @@ def resolve_discrepancy(actor, pk, resolution, reason, evidence, rolls=0, yards=
         shipment = Shipment.objects.select_for_update().get(pk=line.shipment_id)
         lock_lots([line.allocation_line.lot_id])
         if resolution == 'loss':
-            if not actor.can_adjust:
-                raise PermissionDenied('Resolusi kehilangan bahan memerlukan hak adjustment.')
             q = qty(rolls,yards)
             enough(shipment_balance(line),q,'Sisa dalam perjalanan')
             correction = Correction.objects.create(created_by=actor,kind='transit_loss',shipment=shipment,lot=line.allocation_line.lot,reason=reason,evidence=evidence,rolls=q[0],yards=q[1])
@@ -730,8 +709,6 @@ def resolve_discrepancy(actor, pk, resolution, reason, evidence, rolls=0, yards=
         received = shipment.receipts.filter(reversed=False).aggregate(q=Sum('received'))['q'] or 0
         losses = Correction.objects.filter(kind='finished_loss',warehouse_receipt__shipment=shipment).aggregate(q=Sum('rolls'))['q'] or 0
         if resolution == 'loss':
-            if not actor.can_adjust:
-                raise PermissionDenied('Resolusi kehilangan hasil memerlukan hak adjustment.')
             count, _ = qty(rolls,ZERO)
             if count > shipment.quantity-received-losses:
                 raise ValidationError('Kehilangan melebihi sisa hasil dikirim.')
