@@ -11,7 +11,7 @@ class Command(BaseCommand):
     def handle(self,*args,**opts):
         if User.objects.filter(username=opts['username']).exists():
             raise CommandError('Nama pengguna sudah ada.')
-        password=getpass('Kata sandi baru (minimal 12 karakter): ')
+        password=getpass('Kata sandi baru (minimal 6 karakter): ')
         if password!=getpass('Ulangi kata sandi: '):
             raise CommandError('Kata sandi tidak sama.')
         obj=User(username=opts['username'],email=opts['email'],role='admin')

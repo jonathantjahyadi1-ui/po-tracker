@@ -3,6 +3,7 @@ from django import forms
 from django.contrib.auth.forms import AuthenticationForm, UserCreationForm
 from django.core.exceptions import ValidationError
 from .models import *
+from .manual_fields import manualize
 
 LABELS = {'kind':'Jenis','code':'Kode','name':'Nama','pic':'PIC pelapor','contact':'Kontak','notes':'Catatan / alasan','active':'Aktif','unit':'Satuan','standard_usage':'Standar pemakaian (yard/pcs)','target_qty':'Target (pcs)','vendor':'Vendor','invoice':'Nomor invoice','delivery_note':'Nomor surat jalan','invoice_date':'Tanggal invoice','received_date':'Tanggal diterima','invoice_total':'Total invoice (Rp)','warehouse':'Lokasi / gudang','revision_of':'Revisi dari invoice','material':'Bahan','color':'Warna','rolls':'Roll','yards':'Yard','number':'Nomor PO','product':'Produk','target':'Target hasil (pcs)','cmts':'CMT pelaksana','order_date':'Tanggal order','due_date':'Target selesai','order':'PO produksi','source_order':'PO sumber transfer (opsional)','cmt':'CMT','planned_date':'Rencana kirim','lot':'Lot / invoice','allocation_line':'Baris alokasi','sent_date':'Tanggal kirim','report_date':'Tanggal laporan','medium':'Media laporan','condition':'Kondisi','stage':'Tahap','quantity':'Jumlah (pcs)','reject':'Reject (pcs)','eta':'Estimasi selesai','shipment':'Pengiriman hasil','received':'Diterima (pcs)','good':'Good (pcs)','discrepancy':'Ada selisih / kerusakan','action':'Tindakan','target_allocation':'Alokasi transfer yang disetujui','username':'Nama pengguna','first_name':'Nama lengkap','email':'Email','role':'Role','is_active':'Akun aktif','can_adjust':'Hak adjustment','can_reopen':'Hak buka kembali PO','password1':'Kata sandi','password2':'Ulangi kata sandi'}
 
@@ -11,7 +12,11 @@ class BaseForm(forms.ModelForm):
     version = forms.IntegerField(widget=forms.HiddenInput,required=False,initial=1)
     attachment = forms.FileField(label='Lampiran bukti',required=False,help_text='PDF, JPG, PNG · maksimal 10 MB')
     def __init__(self,*args,**kwargs):
+        actor=kwargs.pop('actor',None)
         super().__init__(*args,**kwargs)
+        if self.is_bound and self.data.get(self.add_prefix('DELETE')):
+            actor=None
+        manualize(self,actor)
         for name,field in self.fields.items():
             field.label = LABELS.get(name,field.label)
             if isinstance(field,forms.DateField):
@@ -28,6 +33,8 @@ class BaseForm(forms.ModelForm):
     def masters(self,**mapping):
         for field,kind in mapping.items():
             self.fields[field].queryset = Master.objects.filter(kind=kind,active=True)
+            self.fields[field].master_kind=kind
+            self.fields[field].help_text='Ketik nama atau kode. Nama baru disimpan otomatis.'
     def clean(self):
         data = super().clean()
         attachment = data.get('attachment')
@@ -76,7 +83,7 @@ class OrderForm(BaseForm):
         super().__init__(*args,**kwargs)
         self.fields.pop('attachment')
         self.masters(product='product',cmts='cmt')
-        self.fields['cmts'].help_text='Pilih beberapa CMT dengan Ctrl atau Command. Kosong berarti semua CMT aktif.'
+        self.fields['cmts'].help_text='Ketik nama CMT, pisahkan dengan titik koma (;). Nama baru disimpan otomatis. Kosong berarti semua CMT aktif.'
     def clean_number(self):
         return normalize_po(self.cleaned_data['number'])
 
@@ -165,6 +172,9 @@ class ActionForm(forms.Form):
     token=forms.UUIDField(initial=uuid.uuid4,widget=forms.HiddenInput)
     reason=forms.CharField(label='Alasan / catatan',required=False,widget=forms.Textarea(attrs={'rows':3}))
     attachment=forms.FileField(label='Lampiran bukti',required=False,help_text='PDF, JPG, PNG · maksimal 10 MB')
+    def __init__(self,*args,**kwargs):
+        super().__init__(*args,**kwargs)
+        manualize(self)
 
 class DecisionForm(ActionForm):
     decision=forms.ChoiceField(label='Keputusan',choices=[('approved','Setujui'),('rejected','Tolak'),('revision','Minta revisi')])
@@ -183,17 +193,28 @@ class AdjustmentForm(ActionForm):
 
 class LoginForm(AuthenticationForm):
     username=forms.CharField(label='Nama pengguna',widget=forms.TextInput(attrs={'autofocus':True,'autocomplete':'username'}))
-    password=forms.CharField(label='Kata sandi',widget=forms.PasswordInput(attrs={'autocomplete':'current-password'}))
+    password=forms.CharField(label='Kata sandi',strip=False,widget=forms.PasswordInput(attrs={'autocomplete':'current-password'}))
 
 class AccountForm(forms.ModelForm):
-    new_password=forms.CharField(label='Kata sandi baru',required=False,widget=forms.PasswordInput,help_text='Minimal 12 karakter. Kosongkan untuk mempertahankan kata sandi.')
+    new_password=forms.CharField(label='Kata sandi baru',required=False,min_length=6,strip=False,widget=forms.PasswordInput(attrs={'autocomplete':'new-password'}),help_text='Minimal 6 karakter. Kosongkan jika tidak ingin mengganti kata sandi.')
     token=forms.UUIDField(initial=uuid.uuid4,widget=forms.HiddenInput)
     class Meta:
         model=User
         fields=['username','first_name','email','role','is_active','can_adjust','can_reopen']
         labels=LABELS
+    def __init__(self,*args,**kwargs):
+        super().__init__(*args,**kwargs)
+        self.fields['first_name'].label='Nama lengkap (opsional)'
+        self.fields['email'].label='Email (opsional)'
+        if not self.instance.pk:
+            self.fields.pop('is_active')
+            self.fields['new_password'].required=True
+            self.fields['new_password'].label='Kata sandi'
+            self.fields['new_password'].help_text='Minimal 6 karakter.'
     def clean(self):
         data=super().clean()
+        if not self.instance.pk:
+            data['is_active']=True
         from django.contrib.auth.password_validation import validate_password
         if data.get('new_password'):
             validate_password(data['new_password'],self.instance)

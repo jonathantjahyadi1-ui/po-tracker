@@ -207,6 +207,7 @@ def line_data(formset):
 FORM_MAP={'masters':forms.MasterForm,'receipts':forms.ReceiptForm,'orders':forms.OrderForm,'allocations':forms.AllocationForm,'shipments':forms.ShipmentForm,'cmt':forms.CMTReceiptForm,'progress':forms.ProgressForm,'finished':forms.FinishedForm,'warehouse':forms.WarehouseForm,'reconciliation':forms.ReconciliationForm,'accounts':forms.AccountForm}
 
 @login_required
+@transaction.atomic
 def edit(request,kind,pk=None):
     if kind not in FORM_MAP:
         raise Http404()
@@ -229,14 +230,15 @@ def edit(request,kind,pk=None):
     for field in ['order','cmt','shipment','kind']:
         if request.GET.get(field):
             initial[field]=request.GET[field]
-    form=FORM_MAP[kind](request.POST or None,request.FILES or None,instance=obj,initial=initial)
+            form_kwargs={'actor':request.user} if kind!='accounts' else {}
+    form=FORM_MAP[kind](request.POST or None,request.FILES or None,instance=obj,initial=initial,**form_kwargs)
     formset=None; allocation=None; cmt_line=None
     if kind in ['receipts','allocations','shipments']:
         line_form={'receipts':forms.ReceiptLineForm,'allocations':forms.AllocationLineForm,'shipments':forms.ShipmentLineForm}[kind]
-        kwargs={}
+        kwargs={'actor':request.user}
         if kind=='shipments':
             allocation=obj.allocation if obj else get_object_or_404(Allocation,pk=request.GET.get('allocation'))
-            kwargs={'allocation':allocation}
+            kwargs['allocation']=allocation
         factory=formset_factory(line_form,extra=1 if not pk else 0,can_delete=True,max_num=100,validate_max=True,absolute_max=101)
         line_initial=[{f:getattr(line,f) for f in line_form.Meta.fields} for line in obj.lines.all()] if obj else []
         formset=factory(request.POST or None,prefix='lines',initial=line_initial,form_kwargs=kwargs)
@@ -289,7 +291,10 @@ def edit(request,kind,pk=None):
     if cmt_line:
         q=services.shipment_balance(cmt_line)
         subtitle=f'{cmt_line.shipment.delivery_note} · {cmt_line.allocation_line.lot.code} · Sisa perjalanan {q[0]} roll / {number(q[1],2)} yard'
-    return render(request,'form.html',{'title':title,'active':kind,'kind':kind,'form':form,'formset':formset,'subtitle':subtitle,'back_url':url(obj) if obj else f'/{kind}/','submit_label':'Simpan draft' if kind in ['receipts','orders','allocations','shipments'] else 'Simpan','existing_evidence':getattr(obj,'evidence',None)},status=400 if request.method=='POST' else 200)
+    response=render(request,'form.html',{'title':title,'active':kind,'kind':kind,'form':form,'formset':formset,'subtitle':subtitle,'back_url':url(obj) if obj else f'/{kind}/','submit_label':'Simpan draft' if kind in ['receipts','orders','allocations','shipments'] else 'Simpan','allocation_editor':kind=='allocations','existing_evidence':getattr(obj,'evidence',None)},status=400 if request.method=='POST' else 200)
+    if request.method=='POST':
+        transaction.set_rollback(True)
+    return response
 
 @services.command(['admin'],User)
 def save_account(actor,data,password,pk=None):
@@ -367,7 +372,7 @@ def detail(request,kind,pk):
         rows=[]
         for l in obj.lines.select_related('allocation_line__lot'):
             rem=services.shipment_balance(l)
-            rows.append(row(l,[cell(l.allocation_line.lot.code,url(l.allocation_line.lot)),cell(number(l.rolls),numeric=True),cell(number(l.yards,2),numeric=True),cell(number(rem[1],2),sub=f'{rem[0]} roll',numeric=True),cell('Catat penerimaan',f'/cmt/new/?line={l.pk}') if purchasing and obj.status in ['dispatched','partially_received','discrepancy'] else cell('—')]))
+            rows.append(row(l,[cell(l.lot.code,url(l.lot),sub=f'BARIS-{l.pk}'),cell(l.warehouse.name),cell(number(l.rolls),numeric=True),cell(number(l.yards,2),numeric=True),cell(number(free[1],2),sub=f'{free[0]} roll',numeric=True),cell(number(rem[1],2),sub=f'{rem[0]} roll',numeric=True)]))
         sections.append({'title':'Rincian pengiriman','headers':['Lot','Roll dikirim','Yard dikirim','Sisa perjalanan','Laporan CMT'],'rows':rows})
         sections.append({'title':'Penerimaan CMT','headers':['Tanggal','PIC','Roll','Yard','Kondisi'],'rows':[row(r,[cell(date(r.report_date),url(r)),cell(r.pic),cell(number(r.rolls),numeric=True),cell(number(r.yards,2),numeric=True),cell('reversed' if r.reversed else r.get_condition_display(),status=True)]) for r in CMTReceipt.objects.filter(shipment_line__shipment=obj)]})
     elif kind=='orders':

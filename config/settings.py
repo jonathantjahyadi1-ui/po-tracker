@@ -32,7 +32,7 @@ elif DEBUG or TESTING:
 else:
     raise ImproperlyConfigured('DATABASE_URL Supabase wajib diisi untuk produksi.')
 AUTH_USER_MODEL = 'tracking.User'
-AUTH_PASSWORD_VALIDATORS = [{'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator'}, {'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator', 'OPTIONS': {'min_length': 12}}, {'NAME': 'django.contrib.auth.password_validation.CommonPasswordValidator'}, {'NAME': 'django.contrib.auth.password_validation.NumericPasswordValidator'}]
+AUTH_PASSWORD_VALIDATORS = [{'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator', 'OPTIONS': {'min_length': 6}}]
 PASSWORD_HASHERS = ['django.contrib.auth.hashers.PBKDF2PasswordHasher']
 LANGUAGE_CODE = 'id'
 TIME_ZONE = 'Asia/Jakarta'
