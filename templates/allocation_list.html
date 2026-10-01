@@ -1,0 +1,16 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="page-head"><h1>Alokasi</h1></div>
+<nav class="tabs" aria-label="Status alokasi"><a href="{% url 'allocation_list' %}"
+  {% if not status %}aria-current="page"{% endif %}>Semua</a>
+  {% for value,label in statuses %}<a href="?status={{ value }}"
+  {% if status == value %}aria-current="page"{% endif %}>{{ label }}</a>{% endfor %}</nav>
+<section class="panel"><div class="table-wrap"><table><thead><tr><th>PO</th><th>CMT</th>
+  <th class="num">Roll</th><th>Status</th><th>Dibuat</th></tr></thead><tbody>
+  {% for item in rows %}<tr><td><a class="ref" href="{% url 'allocation_detail' item.pk %}">{{ item.po.nomor }}</a></td>
+  <td>{{ item.cmt.name }}</td><td class="num">{{ item.roll_count }}</td>
+  <td>{% include 'partials/status.html' with item=item %}</td>
+  <td>{{ item.created_at|date:"d M Y" }}</td></tr>
+  {% empty %}<tr><td colspan="5" class="empty">Belum ada alokasi.</td></tr>{% endfor %}
+  </tbody></table></div></section>
+{% endblock %}

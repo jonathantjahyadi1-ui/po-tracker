@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
-pip install -r requirements.lock.txt
+pip install -r requirements.txt
 python manage.py collectstatic --noinput
 python manage.py check --deploy --fail-level WARNING

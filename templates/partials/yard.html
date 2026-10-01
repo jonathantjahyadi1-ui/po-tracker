@@ -1,0 +1,28 @@
+<div class="yard-layout">
+  <div>
+    <div class="yard-tools">
+      <button class="button small" type="button" data-paste-open>
+        Tempel dari Excel/WhatsApp
+      </button>
+      <label class="button small file-label">Impor file
+        <input type="file" name="{{ file_name }}" accept=".csv,.xlsx" data-file>
+      </label>
+      <button class="button small" type="button" data-clear-yards>Bersihkan</button>
+    </div>
+    <div class="paste-box" hidden>
+      <label>Daftar yard<textarea data-paste-text rows="5"></textarea></label>
+      <p data-paste-preview></p>
+      <button class="button small" type="button" data-apply-paste>Terapkan</button>
+    </div>
+    <div class="yard-grid" data-yard-grid></div>
+    <textarea name="yards[]" rows="5" data-yard-source aria-label="Yard per roll"></textarea>
+    <p class="field-error" data-yard-error></p>
+  </div>
+  <div class="yard-summary">
+    <div><span>Roll</span><strong data-roll-count>0</strong></div>
+    <div><span>Total yard</span><strong data-yard-total>0,00</strong></div>
+    <div><span>Rata-rata</span><strong data-yard-average>—</strong></div>
+    <div><span>Terkecil</span><strong data-yard-min>—</strong></div>
+    <div><span>Terbesar</span><strong data-yard-max>—</strong></div>
+  </div>
+</div>

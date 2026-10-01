@@ -1,1 +1,18 @@
-{% extends 'base.html' %}{% block content %}<div class="login-layout"><section class="login-intro"><a class="brand" href="/"><span class="brand-icon">r.</span><span>rantai<span class="brand-caption">BAHAN & PRODUKSI</span></span></a><div><p class="eyebrow">RUANG KERJA OPERASIONAL</p><h1>Dari bahan masuk,<br>sampai hasil diterima.</h1><p class="login-copy">Penerimaan, alokasi, dan produksi dalam satu riwayat.</p><div class="login-route"><span>Vendor</span><span aria-hidden="true">→</span><span>Bahan</span><span aria-hidden="true">→</span><span>CMT</span><span aria-hidden="true">→</span><span>Gudang</span></div></div><p class="muted">Purchasing · Direktur</p></section><section class="login-panel"><div class="login-form"><p class="eyebrow">AKSES SISTEM</p><h2>Masuk ke Rantai</h2><p class="muted">Gunakan akun yang diberikan administrator.</p><form method="post">{% csrf_token %}{{ form.non_field_errors }}{% for field in form %}<div class="field"><label for="{{ field.id_for_label }}">{{ field.label }}</label>{{ field }}{{ field.errors }}</div>{% endfor %}<input type="hidden" name="next" value="{{ next }}"><button class="button primary full" type="submit">Masuk <span aria-hidden="true">→</span></button></form></div></section></div>{% endblock %}
+{% extends 'base.html' %}
+{% block content %}
+<div class="login-shell">
+  <a class="brand" href="/">severli<span>PO TRACKER</span></a>
+  <section class="login-panel">
+    <h1>Masuk</h1>
+    <form method="post" data-submit-form>
+      {% csrf_token %}
+      {{ form.non_field_errors }}
+      {% for field in form %}
+      <div class="field"><label for="{{ field.id_for_label }}">{{ field.label }}</label>
+        {{ field }}{{ field.errors }}</div>
+      {% endfor %}
+      <button class="button primary" type="submit">Masuk</button>
+    </form>
+  </section>
+</div>
+{% endblock %}

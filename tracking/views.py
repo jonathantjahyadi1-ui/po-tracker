@@ -1,532 +1,958 @@
-import hashlib
-import io
-import logging
-import uuid
-from datetime import timedelta
-from decimal import Decimal
-from django.conf import settings
-from django.contrib import messages
-from django.contrib.auth import logout
-from django.contrib.auth.decorators import login_required
-from django.contrib.auth.views import LoginView
-from django.core.exceptions import PermissionDenied, ValidationError
-from django.core.paginator import Paginator
-from django.db import IntegrityError, transaction, connection
-from django.db.models import Sum, Q
-from django.forms import formset_factory
-from django.http import FileResponse, HttpResponse, JsonResponse, Http404
-from django.shortcuts import render, redirect, get_object_or_404
-from django.urls import reverse as route
-from django.utils import timezone
-from django.views.decorators.http import require_POST
-from . import forms, services, storage
-from .models import *
-from .presentation import url, cell, row, number, date, STATUS, RESOURCES
-from .reports import dataset, TITLES, MODEL_MAP, FILTER_PATHS
+from collections import defaultdict
+from datetime import date
+from functools import wraps
+from io import BytesIO
 
-def access(request, kind, write=False):
-    if kind=='accounts':
-        services.require(request.user,['admin'])
-    elif kind=='audit':
-        services.require(request.user,['admin','purchasing'])
-    elif write:
-        services.require(request.user,['purchasing'])
+from django.contrib import messages
+from django.contrib.auth import login, logout
+from django.core.cache import cache
+from django.core.exceptions import PermissionDenied, ValidationError
+from django.db import transaction
+from django.db.models import Count, Max, Prefetch, Q, Sum
+from django.http import HttpResponse, HttpResponseNotAllowed
+from django.shortcuts import get_object_or_404, redirect, render
+from openpyxl import Workbook
+
+from .forms import AccountForm, InvoiceForm, LoginForm, PoForm
+from .models import Alokasi, Hasil, Invoice, KirimGudang, Log, Master, Po, Roll, User
+from .parsers import import_yards, parse_yards, suspicious_yards
+from .services import (
+    ajukan_alokasi,
+    batalkan_invoice,
+    hitung_done,
+    hitung_pemakaian,
+    kirim_gudang,
+    log,
+    pindah_status,
+    po_balance,
+    putuskan_alokasi,
+    roll_count,
+    selesaikan_po,
+    simpan_hasil,
+    simpan_invoice,
+    ubah_roll_invoice,
+    yard_total,
+)
+
+
+def access(*roles):
+    def decorate(view):
+        @wraps(view)
+        def wrapped(request, *args, **kwargs):
+            if not request.user.is_authenticated:
+                return redirect(f'/login/?next={request.path}')
+            if request.user.role not in roles:
+                raise PermissionDenied
+            return view(request, *args, **kwargs)
+
+        return wrapped
+
+    return decorate
+
+
+def write_only(request):
+    if request.user.role != 'purchasing':
+        raise PermissionDenied
+
+
+def flash_error(request, error):
+    messages.error(request, '; '.join(error.messages))
+
+
+def input_date(value):
+    try:
+        return date.fromisoformat(value)
+    except (TypeError, ValueError):
+        raise ValidationError('Tanggal wajib diisi dengan benar.')
+
+
+def input_pcs(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raise ValidationError('Jumlah pcs harus berupa angka bulat.')
+
 
 def health(request):
-    try:
-        with connection.cursor() as cur:
-            cur.execute('SELECT 1')
-        return JsonResponse({'status':'ok'})
-    except Exception:
-        return JsonResponse({'status':'unavailable'},status=503)
+    return HttpResponse('ok', content_type='text/plain')
 
-class SignIn(LoginView):
-    template_name='login.html'
-    authentication_form=forms.LoginForm
-    redirect_authenticated_user=True
-    def keys(self):
-        # Render overwrites client forwarding headers. REMOTE_ADDR is conservative behind other proxies.
-        ip=self.request.META.get('REMOTE_ADDR','unknown')
-        username=self.request.POST.get('username','').strip().lower()
-        return [hashlib.sha256(s.encode()).hexdigest() for s in ['client-account:'+ip+':'+username,'account:'+username]]
-    def post(self,request,*args,**kwargs):
-        if LoginAttempt.objects.filter(key__in=self.keys(),failures__gte=8,last_at__gte=timezone.now()-timedelta(minutes=15)).exists():
-            form=self.get_form()
-            form.add_error(None,'Terlalu banyak percobaan masuk. Coba lagi dalam 15 menit.')
-            return self.render_to_response(self.get_context_data(form=form),status=429)
-        return super().post(request,*args,**kwargs)
-    def form_invalid(self,form):
-        with transaction.atomic():
-            for key in sorted(self.keys()):
-                item,_=LoginAttempt.objects.get_or_create(key=key)
-                item=LoginAttempt.objects.select_for_update().get(pk=item.pk)
-                item.failures=(item.failures if item.last_at>timezone.now()-timedelta(minutes=15) else 0)+1
-                item.last_at=timezone.now()
-                item.save()
-        return super().form_invalid(form)
-    def form_valid(self,form):
-        LoginAttempt.objects.filter(key=self.keys()[1]).update(failures=0)
-        return super().form_valid(form)
 
-@require_POST
+def sign_in(request):
+    if request.user.is_authenticated:
+        return redirect('dashboard')
+    key = f'login:{request.META.get("REMOTE_ADDR", "")}:{request.POST.get("username", "")}'
+    if request.method == 'POST' and cache.get(key, 0) >= 5:
+        messages.error(request, 'Terlalu banyak percobaan. Coba lagi dalam 15 menit.')
+        return render(request, 'login.html', {'form': LoginForm(), 'title': 'Masuk'}, status=429)
+    form = LoginForm(request, data=request.POST or None)
+    if request.method == 'POST':
+        if form.is_valid():
+            cache.delete(key)
+            login(request, form.get_user())
+            return redirect('accounts' if form.get_user().role == 'admin' else 'dashboard')
+        cache.set(key, cache.get(key, 0) + 1, 900)
+    return render(request, 'login.html', {'form': form, 'title': 'Masuk'})
+
+
+@access('purchasing', 'direktur', 'admin')
 def sign_out(request):
+    if request.method != 'POST':
+        return HttpResponseNotAllowed(['POST'])
     logout(request)
     return redirect('login')
 
-@login_required
+
+def balance_flags(pos):
+    ids = [po.pk for po in pos]
+    hasil = defaultdict(dict)
+    kirim = defaultdict(dict)
+    colors = defaultdict(set)
+    for row in (
+        Roll.objects.filter(alokasi__po_id__in=ids).values('alokasi__po_id', 'color_id').distinct()
+    ):
+        colors[row['alokasi__po_id']].add(row['color_id'])
+    for row in Hasil.objects.filter(po_id__in=ids).values('po_id', 'color_id', 'pcs'):
+        hasil[row['po_id']][row['color_id']] = row['pcs']
+    for row in (
+        KirimGudang.objects.filter(po_id__in=ids)
+        .values('po_id', 'color_id')
+        .annotate(total=Sum('pcs'))
+    ):
+        kirim[row['po_id']][row['color_id']] = row['total']
+    for po in pos:
+        po.balance = (
+            bool(hasil[po.pk])
+            and colors[po.pk] == set(hasil[po.pk])
+            and all(pcs == kirim[po.pk].get(color, 0) for color, pcs in hasil[po.pk].items())
+        )
+    return pos
+
+
+@access('purchasing', 'direktur')
 def dashboard(request):
-    metrics=[]
-    physical=services.balance(bucket='physical'); reserved=services.balance(bucket='reserved',location__kind='warehouse')
-    buckets=[('Stok fisik',physical,'physical'),('Teralokasi',reserved,'reserved'),('Stok bebas',services.minus(physical,reserved),''),('Dalam perjalanan',services.balance(bucket='transit'),'transit'),('Di CMT',services.balance(bucket='cmt'),'cmt')]
-    for label,q,bucket in buckets:
-        link='/stock/?scope=warehouse'+('&status='+bucket if bucket else '') if bucket in ['physical','reserved',''] else '/stock/?status='+bucket
-        metrics.append({'label':label,'yards':q[1],'rolls':q[0],'link':link})
-    orders=list(Order.objects.exclude(status__in=['closed','cancelled']).select_related('product').order_by('due_date','-id')[:7])
-    order_totals=services.totals_many(orders)
-    order_rows=[{'order':o,**order_totals[o.pk]} for o in orders]
-    draft_allocations=Allocation.objects.filter(status='draft').count()
-    shipments=Shipment.objects.filter(status__in=['dispatched','partially_received']).count()
-    exceptions=Discrepancy.objects.filter(resolved=False).count()
-    overdue=Order.objects.exclude(status__in=['closed','cancelled','balanced']).filter(due_date__lt=timezone.localdate()).count()
-    audit=Audit.objects.select_related('actor').all()
-    if request.user.role=='purchasing':
-        audit=audit.filter(actor=request.user)
-    elif request.user.role=='director':
-        audit=Audit.objects.none()
-    return render(request,'dashboard.html',{'title':'Ringkasan','active':'dashboard','metrics':metrics,'order_rows':order_rows,'draft_allocations':draft_allocations,'shipment_count':shipments,'exception_count':exceptions,'overdue':overdue,'active_orders':Order.objects.exclude(status__in=['closed','cancelled','draft']).count(),'activities':audit[:5],'incoming':Receipt.objects.filter(status='posted',received_date__year=timezone.localdate().year,received_date__month=timezone.localdate().month).count()})
+    stock = Roll.objects.filter(status='tersedia', invoice__dibatalkan=False).aggregate(
+        rolls=Count('id'), yards=Sum('yard')
+    )
+    waiting = (
+        Alokasi.objects.filter(status='menunggu')
+        .select_related('po', 'cmt')
+        .annotate(rolls=Count('roll'))
+    )
+    ready = Roll.objects.filter(status='siap_kirim').count()
+    pos = balance_flags(list(Po.objects.filter(selesai=False).order_by('-id')))
+    return render(
+        request,
+        'dashboard.html',
+        {
+            'title': 'Ringkasan',
+            'active': 'dashboard',
+            'stock': stock,
+            'waiting_count': len(waiting),
+            'waiting_rolls': sum(a.rolls for a in waiting),
+            'ready': ready,
+            'unbalanced_count': sum(not po.balance for po in pos),
+            'waiting': waiting[:5],
+            'unbalanced': [po for po in pos if not po.balance][:5],
+        },
+    )
 
-def list_filters(kind,request):
-    form=forms.FilterForm(request.GET)
-    for key in list(form.fields):
-        if key not in ['q','start','end'] and key not in FILTER_PATHS[kind]:
-            form.fields.pop(key)
-    if 'status' in form.fields:
-        field=FILTER_PATHS[kind]['status']
-        choices=['physical','reserved','transit','cmt'] if field=='bucket' else list(STATUS)
-        form.fields['status']=__import__('django.forms',fromlist=['ChoiceField']).ChoiceField(label='Status',required=False,choices=[('','Semua status')]+[(x,STATUS[x]) for x in choices])
-        if kind=='shipments':
-            form.fields['status'].choices += [('awaiting_receipt','Belum selesai diterima')]
-    if kind=='stock' and 'order' in form.fields:
-        form.fields['order'].label='Lot terkait PO'
-        form.fields['product'].label='Lot terkait produk'
-    form.is_valid()
-    return form
 
-@login_required
-def listing(request,kind):
-    if kind not in TITLES:
-        raise Http404()
-    access(request,kind)
-    form=list_filters(kind,request)
-    options={k:v for k,v in request.GET.items() if not k.startswith('_')}
-    if kind not in ['stock','movements']:
-        options['_page']=request.GET.get('page',1)
-    headers,rows=dataset(kind,form.cleaned_data,request.user,options) if form.is_valid() else ([],[])
-    total=options.get('_total',len(rows))
-    if '_total' in options:
-        page=Paginator(range(total),25).get_page(options['_page_number'])
-        page.object_list=rows
-    else:
-        page=Paginator(rows,25).get_page(request.GET.get('page'))
-    params=request.GET.copy(); params.pop('page',None)
-    export_allowed=request.user.role in ['purchasing','director','admin']
-    create_url=''
-    create_label='Tambah'
-    if request.user.role=='purchasing' and kind in ['receipts','orders','allocations','masters','progress','finished','warehouse','reconciliation']:
-        create_url=route('create',args=[kind]); create_label={'receipts':'Terima bahan','orders':'Buat PO','allocations':'Buat alokasi','masters':'Tambah master','progress':'Catat progres','finished':'Kirim hasil','warehouse':'Terima hasil','reconciliation':'Rekonsiliasi bahan'}[kind]
-    elif kind=='accounts' and request.user.role=='admin':
-        create_url=route('create',args=[kind]); create_label='Tambah akun'
-    tabs=[]
-    if kind in ['shipments','cmt','progress','finished','warehouse','exceptions']:
-        tabs=[(x,TITLES[x],f'/{x}/') for x in ['shipments','cmt','progress','finished','warehouse','exceptions']]
-    if kind in ['stock','movements']:
-        tabs=[('stock','Saldo bahan','/stock/'),('movements','Kartu stok','/movements/')]
-    if kind=='masters':
-        tabs=[(k,label,'/masters/?kind='+k) for k,label in Master.Kind.choices]
-    return render(request,'list.html',{'title':TITLES[kind],'active':kind if kind not in ['cmt','progress','finished','warehouse','exceptions'] else 'shipments','kind':kind,'headers':headers,'page':page,'count':total,'filters':form,'params':params.urlencode(),'create_url':create_url,'create_label':create_label,'export_allowed':export_allowed,'tabs':tabs})
-
-@login_required
-def export(request,kind):
-    if kind not in TITLES:
-        raise Http404()
-    access(request,kind)
-    services.require(request.user,['purchasing','director','admin'])
-    form=list_filters(kind,request)
-    if not form.is_valid():
-        return render(request,'error.html',{'title':'Filter tidak valid','error':form.errors},status=400)
-    headers,rows=dataset(kind,form.cleaned_data,request.user,{k:v for k,v in request.GET.items() if not k.startswith('_')})
-    if len(rows)>50000:
-        return render(request,'error.html',{'title':'Persempit periode laporan','error':'Ekspor maksimal 50.000 baris. Pilih periode atau filter yang lebih spesifik.'},status=400)
-    from openpyxl import Workbook
-    from openpyxl.styles import Font,PatternFill,Alignment
-    book=Workbook(); sheet=book.active; sheet.title=TITLES[kind][:31]
-    sheet.append(headers or ['Tidak ada data'])
-    for item in rows:
-        values=[]
-        for c in item['cells']:
-            value=c['value']
-            if c.get('numeric'):
-                try:
-                    value=Decimal(str(value).replace('.','').replace(',','.'))
-                except Exception:
-                    value=str(value)
-            else:
-                value=str(value)+(f" | {c['sub']}" if c.get('sub') else '')
-                if value.lstrip().startswith(('=','+','-','@','\t','\r')):
-                    value="'"+value
-            values.append(value)
-        sheet.append(values)
-    for c in sheet[1]:
-        c.font=Font(bold=True,color='FFFFFF'); c.fill=PatternFill('solid',fgColor='253D31')
-    for cells in sheet.iter_rows(min_row=2):
-        for c in cells:
-            c.alignment=Alignment(vertical='top',wrap_text=True)
-            if c.data_type=='n':
-                c.number_format='#,##0.00'
-    for col in sheet.columns:
-        sheet.column_dimensions[col[0].column_letter].width=min(55,max(16,max(len(str(c.value or '')) for c in col[:100])+2))
-    sheet.freeze_panes='A2'; sheet.auto_filter.ref=sheet.dimensions
-    meta=book.create_sheet('Filter')
-    meta.append(['Laporan',TITLES[kind]]); meta.append(['Waktu ekspor',timezone.localtime().isoformat()]); meta.append(['Jumlah baris',len(rows)])
-    for k,v in request.GET.items():
-        if k!='page':
-            meta.append([k,"'"+str(v)])
-    output=io.BytesIO(); book.save(output); output.seek(0)
-    services.audit(request.user,'export',request.user,after={'report':kind,'rows':len(rows),'filters':dict(request.GET)})
-    return FileResponse(output,as_attachment=True,filename=f'{kind}-{timezone.localdate()}.xlsx',content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
-
-@login_required
-def reports_home(request):
-    return render(request,'reports.html',{'title':'Laporan & arsip','active':'reports','reports':[(k,TITLES[k],f'/{k}/') for k in ['stock','movements','receipts','allocations','cmt','orders','finished','warehouse','reconciliation','exceptions','corrections']]+[('archive','Arsip PO','/orders/?archive=1')]})
-
-def business_data(form):
-    return {k:form.cleaned_data[k] for k in form.Meta.fields if k in form.cleaned_data}
-
-def line_data(formset):
-    return [{k:form.cleaned_data[k] for k in form.Meta.fields if k in form.cleaned_data} for form in formset if form.cleaned_data and not form.cleaned_data.get('DELETE')]
-
-FORM_MAP={'masters':forms.MasterForm,'receipts':forms.ReceiptForm,'orders':forms.OrderForm,'allocations':forms.AllocationForm,'shipments':forms.ShipmentForm,'cmt':forms.CMTReceiptForm,'progress':forms.ProgressForm,'finished':forms.FinishedForm,'warehouse':forms.WarehouseForm,'reconciliation':forms.ReconciliationForm,'accounts':forms.AccountForm}
-
-@login_required
-@transaction.atomic
-def edit(request,kind,pk=None):
-    if kind not in FORM_MAP:
-        raise Http404()
-    access(request,kind,True)
-    if request.method=='POST':
-        try:
-            token=uuid.UUID(request.POST.get('token',''))
-            expected={'masters':'save_master','receipts':'save_receipt','orders':'save_order','allocations':'save_allocation','shipments':'save_shipment','cmt':'receive_cmt','progress':'save_progress','finished':'send_finished','warehouse':'receive_warehouse','reconciliation':'reconcile','accounts':'save_account'}[kind]
-            previous=Operation.objects.filter(key=token,actor=request.user,action=expected,result_id__isnull=False).first()
-            if previous:
-                return redirect(url(MODEL_MAP[kind].objects.get(pk=previous.result_id)))
-        except (ValueError,TypeError):
-            pass
-    obj=get_object_or_404(MODEL_MAP[kind],pk=pk) if pk else None
-    if pk and kind not in ['masters','receipts','orders','allocations','shipments','accounts']:
-        raise PermissionDenied('Transaksi posted tidak dapat diedit. Gunakan reversal.')
-    if pk and hasattr(obj,'status') and obj.status!='draft':
-        raise PermissionDenied('Transaksi sudah terkunci. Gunakan reversal atau koreksi.')
-    initial={}
-    for field in ['order','cmt','shipment','kind']:
-        if request.GET.get(field):
-            initial[field]=request.GET[field]
-    form_kwargs={'actor':request.user} if kind!='accounts' else {}
-    form=FORM_MAP[kind](request.POST or None,request.FILES or None,instance=obj,initial=initial,**form_kwargs)
-    formset=None; allocation=None; cmt_line=None
-    if kind in ['receipts','allocations','shipments']:
-        line_form={'receipts':forms.ReceiptLineForm,'allocations':forms.AllocationLineForm,'shipments':forms.ShipmentLineForm}[kind]
-        kwargs={'actor':request.user}
-        if kind=='shipments':
-            allocation=obj.allocation if obj else get_object_or_404(Allocation,pk=request.GET.get('allocation'))
-            kwargs['allocation']=allocation
-        factory=formset_factory(line_form,extra=1 if not pk else 0,can_delete=True,max_num=100,validate_max=True,absolute_max=101)
-        line_initial=[{f:getattr(line,f) for f in line_form.Meta.fields} for line in obj.lines.all()] if obj else []
-        formset=factory(request.POST or None,prefix='lines',initial=line_initial,form_kwargs=kwargs)
-    if kind=='cmt':
-        cmt_line=get_object_or_404(ShipmentLine,pk=request.GET.get('line'))
-    if request.method=='POST':
-        valid=form.is_valid()
-        lines_valid=formset.is_valid() if formset else True
-        if valid and lines_valid:
+@access('purchasing', 'direktur')
+def master_page(request):
+    if request.method == 'POST':
+        write_only(request)
+        kind = request.POST.get('kind', '')
+        name = ' '.join(request.POST.get('name', '').split())
+        if kind not in Master.Kind.values or not name:
+            messages.error(request, 'Jenis dan nama wajib diisi.')
+        else:
             try:
                 with transaction.atomic():
-                    data=business_data(form)
-                    token=form.cleaned_data['token']; version=form.cleaned_data.get('version')
-                    # Retry must not upload a second copy if the command already completed.
-                    evidence=storage.upload(request.user,form.cleaned_data.get('attachment'))
-                    if kind in ['receipts','shipments','cmt','progress','finished','warehouse','reconciliation']:
-                        data['evidence']=evidence or (getattr(obj,'evidence',None) if obj else None)
-                    if kind=='masters':
-                        saved=services.save_master(request.user,data,pk=pk,version=version,key=token)
-                    elif kind=='receipts':
-                        saved=services.save_receipt(request.user,data,line_data(formset),pk=pk,version=version,key=token)
-                    elif kind=='orders':
-                        saved=services.save_order(request.user,data,pk=pk,version=version,key=token)
-                    elif kind=='allocations':
-                        saved=services.save_allocation(request.user,data,line_data(formset),pk=pk,version=version,key=token)
-                        if request.POST.get('intent')=='allocate':
-                            saved=services.post_allocation(request.user,saved.pk,key=uuid.uuid5(token,'post-allocation'))
-                    elif kind=='shipments':
-                        saved=services.save_shipment(request.user,allocation,data,line_data(formset),pk=pk,version=version,key=token)
-                    elif kind=='cmt':
-                        saved=services.receive_cmt(request.user,cmt_line,data,key=token)
-                    elif kind=='progress':
-                        saved=services.save_progress(request.user,data,key=token)
-                    elif kind=='finished':
-                        saved=services.send_finished(request.user,data,key=token)
-                    elif kind=='warehouse':
-                        saved=services.receive_warehouse(request.user,data,key=token)
-                    elif kind=='reconciliation':
-                        saved=services.reconcile(request.user,data,key=token)
+                    pk = request.POST.get('id')
+                    item = get_object_or_404(Master, pk=pk, kind=kind) if pk else Master(kind=kind)
+                    if request.POST.get('action') == 'toggle':
+                        item.active = not item.active
                     else:
-                        saved=save_account(request.user,data,form.cleaned_data.get('new_password'),pk=pk,key=token)
-                    if kind=='allocations' and request.POST.get('intent')=='allocate':
-                        messages.success(request,'Bahan berhasil dialokasikan. Stok sudah direservasi.')
-                    else:
-                        messages.success(request,'Data tersimpan.' if kind in ['masters','accounts','receipts','orders','allocations','shipments'] else 'Laporan berhasil dicatat.')
-                    return redirect(url(saved))
+                        if (
+                            Master.objects.filter(kind=kind, name__iexact=name)
+                            .exclude(pk=item.pk)
+                            .exists()
+                        ):
+                            raise ValidationError('Nama sudah ada dalam daftar ini.')
+                        item.name = name
+                    item.save()
+                    log(request.user, 'ubah master', f'{item.get_kind_display()} {item.name}')
+                    messages.success(request, 'Master tersimpan.')
             except ValidationError as error:
-                form.add_error(None,error)
-            except IntegrityError:
-                form.add_error(None,'Nomor atau rincian duplikat. Periksa invoice, kode, PO, dan lot yang sama.')
-    title=('Ubah ' if pk else 'Tambah ')+TITLES[kind].lower()
-    subtitle='Periksa rincian, lalu simpan draft.' if kind in ['receipts','orders','allocations','shipments'] else 'Catat data sesuai laporan yang diterima.'
-    if kind=='allocations':
-        subtitle='Simpan draft atau langsung alokasikan bahan. Alokasi langsung mereservasi stok yang tersedia.'
-    elif kind=='accounts':
-        subtitle='Purchasing mengisi seluruh transaksi. Direktur memantau dan mengunduh laporan. Super Admin mengelola akun.'
-    if allocation:
-        subtitle=f'{allocation} · {allocation.order} · {allocation.cmt.name}'
-    if cmt_line:
-        q=services.shipment_balance(cmt_line)
-        subtitle=f'{cmt_line.shipment.delivery_note} · {cmt_line.allocation_line.lot.code} · Sisa perjalanan {q[0]} roll / {number(q[1],2)} yard'
-    response=render(request,'form.html',{'title':title,'active':kind,'kind':kind,'form':form,'formset':formset,'subtitle':subtitle,'back_url':url(obj) if obj else f'/{kind}/','submit_label':'Simpan draft' if kind in ['receipts','orders','allocations','shipments'] else 'Simpan','allocation_editor':kind=='allocations','existing_evidence':getattr(obj,'evidence',None)},status=400 if request.method=='POST' else 200)
-    if request.method=='POST':
-        # Inline master records and their audits must not survive a failed transaction.
-        transaction.set_rollback(True)
+                flash_error(request, error)
+        return redirect(f'/master/?tab={kind}')
+    tab = request.GET.get('tab', 'vendor')
+    if tab not in Master.Kind.values:
+        tab = 'vendor'
+    return render(
+        request,
+        'master.html',
+        {
+            'title': 'Master',
+            'active': 'master',
+            'tab': tab,
+            'kinds': Master.Kind.choices,
+            'items': Master.objects.filter(kind=tab),
+        },
+    )
+
+
+@access('purchasing', 'direktur')
+def vendor_list(request):
+    vendors = list(Master.objects.filter(kind='vendor', active=True))
+    totals = (
+        Roll.objects.filter(invoice__dibatalkan=False)
+        .values('invoice__vendor_id')
+        .annotate(
+            rolls=Count('id'),
+            available=Count('id', filter=Q(status='tersedia')),
+            allocated=Count('id', filter=~Q(status='tersedia')),
+            last_send=Max('tgl_kirim'),
+        )
+    )
+    by_vendor = {row['invoice__vendor_id']: row for row in totals}
+    material_rows = (
+        Roll.objects.filter(invoice__dibatalkan=False)
+        .values('invoice__vendor_id', 'material__name')
+        .distinct()
+    )
+    materials = defaultdict(list)
+    for row in material_rows:
+        materials[row['invoice__vendor_id']].append(row['material__name'])
+    for vendor in vendors:
+        vendor.summary = by_vendor.get(vendor.pk, {})
+        vendor.materials = ', '.join(materials[vendor.pk])
+    return render(
+        request,
+        'vendor_list.html',
+        {
+            'title': 'Vendor',
+            'active': 'vendor',
+            'vendors': vendors,
+        },
+    )
+
+
+@access('purchasing', 'direktur')
+def vendor_detail(request, pk):
+    vendor = get_object_or_404(Master, pk=pk, kind='vendor')
+    invoices = list(
+        Invoice.objects.filter(vendor=vendor, dibatalkan=False)
+        .order_by('-tanggal', '-id')
+        .prefetch_related(
+            Prefetch(
+                'roll_set',
+                queryset=Roll.objects.select_related('material', 'color', 'alokasi__cmt'),
+            )
+        )
+    )
+    grouped_yards = {
+        (row['invoice_id'], row['material_id'], row['color_id']): row['yard']
+        for row in Roll.objects.filter(invoice_id__in=[item.pk for item in invoices])
+        .values('invoice_id', 'material_id', 'color_id')
+        .annotate(yard=Sum('yard'))
+    }
+    for invoice in invoices:
+        groups = {}
+        for roll in invoice.roll_set.all():
+            key = (roll.material_id, roll.color_id)
+            row = groups.setdefault(
+                key,
+                {
+                    'material': roll.material,
+                    'color': roll.color,
+                    'rolls': 0,
+                    'yard': 0,
+                    'available': 0,
+                    'pending': defaultdict(int),
+                    'sent': defaultdict(lambda: defaultdict(int)),
+                },
+            )
+            row['rolls'] += 1
+            if roll.status == 'tersedia':
+                row['available'] += 1
+            elif roll.status in ('menunggu', 'siap_kirim'):
+                row['pending'][roll.alokasi.cmt.name] += 1
+            elif roll.tgl_kirim:
+                row['sent'][roll.tgl_kirim][roll.alokasi.cmt.name] += 1
+        invoice.rows = list(groups.values())
+        for row in invoice.rows:
+            row['yard'] = grouped_yards[(invoice.pk, row['material'].pk, row['color'].pk)]
+            row['pending'] = dict(row['pending'])
+            row['sent'] = {date: dict(counts) for date, counts in row['sent'].items()}
+        invoice.dates = sorted({date for row in invoice.rows for date in row['sent']})
+        invoice.yards = sum((row['yard'] for row in invoice.rows), 0)
+    return render(
+        request,
+        'vendor_detail.html',
+        {
+            'title': vendor.name,
+            'active': 'vendor',
+            'vendor': vendor,
+            'invoices': invoices,
+        },
+    )
+
+
+def posted_groups(request):
+    names = request.POST.getlist('material[]')
+    colors = request.POST.getlist('color[]')
+    locations = request.POST.getlist('lokasi[]')
+    notes = request.POST.getlist('catatan[]')
+    texts = request.POST.getlist('yards[]')
+    groups = []
+    for index, name in enumerate(names):
+        text = texts[index] if index < len(texts) else ''
+        upload = request.FILES.get(f'file-{index}')
+        if not name.strip() and not text.strip() and not upload:
+            continue
+        yards, errors = parse_yards(text)
+        if upload:
+            imported, file_errors = import_yards(upload)
+            yards.extend(imported)
+            errors.extend(file_errors)
+        if errors:
+            raise ValidationError(errors)
+        if not name.strip() or index >= len(colors) or not colors[index].strip():
+            raise ValidationError(f'Bahan {index + 1}: bahan dan warna wajib diisi.')
+        if not yards:
+            raise ValidationError(f'Bahan {index + 1}: masukkan yard per roll.')
+        groups.append(
+            {
+                'material': name,
+                'color': colors[index],
+                'lokasi': locations[index] if index < len(locations) else '',
+                'catatan': notes[index] if index < len(notes) else '',
+                'yards': yards,
+                'suspicious': suspicious_yards(yards),
+            }
+        )
+    if not groups and not request.POST.get('existing'):
+        raise ValidationError('Tambahkan setidaknya satu bahan.')
+    return groups
+
+
+@access('purchasing', 'direktur')
+def invoice_edit(request, pk=None):
+    invoice = get_object_or_404(Invoice, pk=pk) if pk else None
+    form_error = False
+    existing = (
+        list(
+            invoice.roll_set.select_related('material', 'color', 'lokasi').order_by(
+                'material__name', 'color__name', 'urut'
+            )
+        )
+        if invoice
+        else []
+    )
+    initial = (
+        {key: getattr(invoice, key) for key in InvoiceForm.base_fields if key != 'vendor'}
+        if invoice
+        else {}
+    )
+    if invoice:
+        initial['vendor'] = invoice.vendor.name
+    form = InvoiceForm(request.POST or None, initial=initial)
+    if request.method == 'POST':
+        write_only(request)
+        try:
+            if not form.is_valid():
+                raise ValidationError('Periksa data invoice yang ditandai.')
+            groups = posted_groups(request)
+            with transaction.atomic():
+                if invoice:
+                    ubah_roll_invoice(invoice, request.POST, request.user)
+                saved = simpan_invoice(form.cleaned_data, groups, request.user, invoice)
+            messages.success(request, 'Invoice tersimpan.')
+            return redirect('invoice_detail', pk=saved.pk)
+        except ValidationError as error:
+            flash_error(request, error)
+            form_error = True
+    return render(
+        request,
+        'invoice_form.html',
+        {
+            'title': 'Ubah invoice' if invoice else 'Tambah bahan',
+            'active': 'vendor',
+            'form': form,
+            'invoice': invoice,
+            'existing': existing,
+            'vendors': Master.objects.filter(kind='vendor', active=True),
+            'materials': Master.objects.filter(kind='material', active=True),
+            'colors': Master.objects.filter(kind='color', active=True),
+            'warehouses': Master.objects.filter(kind='warehouse', active=True),
+            'form_error': form_error,
+        },
+    )
+
+
+@access('purchasing', 'direktur')
+def invoice_detail(request, pk):
+    invoice = get_object_or_404(Invoice.objects.select_related('vendor'), pk=pk)
+    rolls = list(
+        invoice.roll_set.select_related(
+            'material', 'color', 'lokasi', 'alokasi__po', 'alokasi__cmt'
+        ).order_by('material__name', 'color__name', 'urut')
+    )
+    return render(
+        request,
+        'invoice_detail.html',
+        {
+            'title': invoice.nomor,
+            'active': 'vendor',
+            'invoice': invoice,
+            'rolls': rolls,
+            'roll_count': roll_count(invoice.roll_set.all()),
+            'yard_total': yard_total(invoice.roll_set.all()),
+            'cmts': Master.objects.filter(kind='cmt', active=True),
+            'pos': Po.objects.all(),
+        },
+    )
+
+
+@access('purchasing', 'direktur')
+def invoice_cancel(request, pk):
+    if request.method != 'POST':
+        return HttpResponseNotAllowed(['POST'])
+    write_only(request)
+    invoice = get_object_or_404(Invoice, pk=pk)
+    try:
+        batalkan_invoice(invoice, request.user)
+        messages.success(request, 'Invoice dibatalkan.')
+        return redirect('vendor_detail', pk=invoice.vendor_id)
+    except ValidationError as error:
+        flash_error(request, error)
+        return redirect('invoice_detail', pk=pk)
+
+
+@access('purchasing', 'direktur')
+def allocation_create(request):
+    if request.method != 'POST':
+        return HttpResponseNotAllowed(['POST'])
+    write_only(request)
+    try:
+        cmt = get_object_or_404(Master, pk=request.POST.get('cmt'), kind='cmt')
+        allocation = ajukan_alokasi(
+            request.POST.getlist('roll'), request.POST.get('po', ''), cmt, request.user
+        )
+        messages.success(request, 'Alokasi diajukan.')
+        return redirect('allocation_detail', pk=allocation.pk)
+    except (ValidationError, ValueError) as error:
+        messages.error(request, str(error))
+        return redirect(request.META.get('HTTP_REFERER', '/alokasi/'))
+
+
+@access('purchasing', 'direktur')
+def allocation_list(request):
+    status = request.GET.get('status', '')
+    rows = (
+        Alokasi.objects.select_related('po', 'cmt')
+        .annotate(roll_count=Count('roll'))
+        .order_by('-id')
+    )
+    if status in Alokasi.Status.values:
+        rows = rows.filter(status=status)
+    return render(
+        request,
+        'allocation_list.html',
+        {
+            'title': 'Alokasi',
+            'active': 'allocation',
+            'rows': rows,
+            'status': status,
+            'statuses': Alokasi.Status.choices,
+        },
+    )
+
+
+@access('purchasing', 'direktur')
+def allocation_detail(request, pk):
+    allocation = get_object_or_404(Alokasi.objects.select_related('po', 'cmt'), pk=pk)
+    if request.method == 'POST':
+        write_only(request)
+        action = request.POST.get('action', '')
+        try:
+            if action in ('acc', 'tolak', 'batalkan'):
+                putuskan_alokasi(allocation, action, request.user, request.POST.get('alasan', ''))
+            elif action in ('kirim', 'terima'):
+                ids = request.POST.getlist('roll')
+                tanggal = input_date(request.POST.get('tanggal'))
+                fields = {'tgl_kirim': tanggal, 'sj_kirim': request.POST.get('surat_jalan', '')}
+                if action == 'terima':
+                    fields = {'tgl_terima': tanggal}
+                if Roll.objects.filter(pk__in=ids).exclude(alokasi=allocation).exists():
+                    raise ValidationError('Roll tidak termasuk alokasi ini.')
+                pindah_status(
+                    ids, 'dikirim' if action == 'kirim' else 'diterima', request.user, **fields
+                )
+            else:
+                raise ValidationError('Aksi tidak dikenal.')
+            messages.success(request, 'Alokasi diperbarui.')
+        except ValidationError as error:
+            flash_error(request, error)
+        return redirect('allocation_detail', pk=pk)
+    rolls = allocation.roll_set.select_related('invoice', 'material', 'color').order_by(
+        'invoice_id', 'material__name', 'color__name', 'urut'
+    )
+    return render(
+        request,
+        'allocation_detail.html',
+        {
+            'title': f'Alokasi #{pk}',
+            'active': 'allocation',
+            'allocation': allocation,
+            'rolls': rolls,
+        },
+    )
+
+
+@access('purchasing', 'direktur')
+def cmt_list(request):
+    cmts = list(Master.objects.filter(kind='cmt', active=True))
+    status_counts = (
+        Roll.objects.filter(alokasi__isnull=False)
+        .values('alokasi__cmt_id', 'status')
+        .annotate(total=Count('id'))
+    )
+    counts = defaultdict(dict)
+    for row in status_counts:
+        counts[row['alokasi__cmt_id']][row['status']] = row['total']
+    po_links = Alokasi.objects.filter(roll__isnull=False).values_list('cmt_id', 'po_id').distinct()
+    po_status = {po.pk: po.balance for po in balance_flags(list(Po.objects.all()))}
+    po_counts = defaultdict(lambda: [0, 0])
+    for cmt_id, po_id in po_links:
+        po_counts[cmt_id][0 if po_status[po_id] else 1] += 1
+    for cmt in cmts:
+        cmt.counts = counts[cmt.pk]
+        cmt.at_cmt = sum(counts[cmt.pk].get(status, 0) for status in ('dikirim', 'diterima'))
+        cmt.balance_count, cmt.unbalanced_count = po_counts[cmt.pk]
+    return render(
+        request,
+        'cmt_list.html',
+        {
+            'title': 'CMT',
+            'active': 'cmt',
+            'cmts': cmts,
+        },
+    )
+
+
+@access('purchasing', 'direktur')
+def cmt_detail(request, pk):
+    cmt = get_object_or_404(Master, pk=pk, kind='cmt')
+    allocations = (
+        Alokasi.objects.filter(cmt=cmt)
+        .select_related('po')
+        .annotate(roll_count=Count('roll'))
+        .order_by('-id')
+    )
+    pos = balance_flags(
+        list(
+            Po.objects.filter(
+                id__in=Alokasi.objects.filter(cmt=cmt, roll__isnull=False).values('po_id')
+            ).order_by('-id')
+        )
+    )
+    return render(
+        request,
+        'cmt_detail.html',
+        {
+            'title': cmt.name,
+            'active': 'cmt',
+            'cmt': cmt,
+            'allocations': allocations,
+            'pos': pos,
+        },
+    )
+
+
+@access('purchasing', 'direktur')
+def po_list(request):
+    filter_value = request.GET.get('filter', 'belum')
+    pos = balance_flags(list(Po.objects.order_by('-id')))
+    if filter_value == 'selesai':
+        pos = [po for po in pos if po.selesai]
+    elif filter_value == 'balance':
+        pos = [po for po in pos if po.balance and not po.selesai]
+    else:
+        filter_value = 'belum'
+        pos = [po for po in pos if not po.balance and not po.selesai]
+    return render(
+        request,
+        'po_list.html',
+        {
+            'title': 'PO',
+            'active': 'po',
+            'pos': pos,
+            'filter': filter_value,
+        },
+    )
+
+
+def po_rows(po, rolls):
+    colors = {roll.color_id: roll.color for roll in rolls}
+    results = {item.color_id: item.pcs for item in Hasil.objects.filter(po=po)}
+    roll_totals = {
+        row['color_id']: row
+        for row in Roll.objects.filter(alokasi__po=po)
+        .values('color_id')
+        .annotate(rolls=Count('id'), yard=Sum('yard'))
+    }
+    usage = dict(
+        Roll.objects.filter(alokasi__po=po, status__in=['dikirim', 'diterima', 'terpakai'])
+        .values('color_id')
+        .annotate(total=Sum('yard'))
+        .values_list('color_id', 'total')
+    )
+    shipments = defaultdict(dict)
+    dates = set()
+    for item in KirimGudang.objects.filter(po=po).select_related('color'):
+        shipments[item.color_id][item.tanggal] = (
+            shipments[item.color_id].get(item.tanggal, 0) + item.pcs
+        )
+        dates.add(item.tanggal)
+    rows = []
+    for color_id, color in colors.items():
+        selected = [roll for roll in rolls if roll.color_id == color_id]
+        result = results.get(color_id, 0)
+        sent = sum(shipments[color_id].values())
+        rows.append(
+            {
+                'color': color,
+                'invoices': ', '.join(dict.fromkeys(roll.invoice.nomor for roll in selected)),
+                'surat_jalan': ', '.join(
+                    dict.fromkeys(
+                        roll.invoice.surat_jalan for roll in selected if roll.invoice.surat_jalan
+                    )
+                ),
+                'rolls': roll_totals[color_id]['rolls'],
+                'yard': roll_totals[color_id]['yard'],
+                'hasil': result,
+                'sent': shipments[color_id],
+                'done': hitung_done(result, sent),
+                'pemakaian': hitung_pemakaian(usage.get(color_id, 0), result),
+            }
+        )
+    return rows, sorted(dates)
+
+
+@access('purchasing', 'direktur')
+def po_detail(request, pk):
+    po = get_object_or_404(Po, pk=pk)
+    if request.method == 'POST':
+        write_only(request)
+        if po.selesai:
+            raise PermissionDenied
+        action = request.POST.get('action')
+        try:
+            if action == 'edit':
+                form = PoForm(request.POST, instance=po)
+                if not form.is_valid():
+                    raise ValidationError(
+                        '; '.join(
+                            f'{field}: {error}'
+                            for field, errors in form.errors.items()
+                            for error in errors
+                        )
+                    )
+                form.save()
+                log(request.user, 'ubah PO', po.nomor)
+            elif action == 'hasil':
+                color = get_object_or_404(Master, pk=request.POST.get('color'), kind='color')
+                simpan_hasil(po, color, input_pcs(request.POST.get('pcs')), request.user)
+            elif action == 'kirim':
+                color = get_object_or_404(Master, pk=request.POST.get('color'), kind='color')
+                warehouse_id = request.POST.get('gudang')
+                warehouse = None
+                if warehouse_id:
+                    warehouse = get_object_or_404(
+                        Master, pk=warehouse_id, kind='warehouse', active=True
+                    )
+                kirim_gudang(
+                    po,
+                    color,
+                    {
+                        'tanggal': input_date(request.POST.get('tanggal')),
+                        'pcs': input_pcs(request.POST.get('pcs')),
+                        'gudang': warehouse,
+                        'surat_jalan': request.POST.get('surat_jalan', ''),
+                        'catatan': request.POST.get('catatan', ''),
+                    },
+                    request.user,
+                )
+            elif action == 'selesai':
+                selesaikan_po(po, request.user)
+            else:
+                raise ValidationError('Aksi PO tidak dikenal.')
+            messages.success(request, 'PO diperbarui.')
+        except (ValidationError, ValueError) as error:
+            messages.error(request, str(error))
+        return redirect('po_detail', pk=pk)
+    rolls = list(
+        Roll.objects.filter(alokasi__po=po)
+        .select_related('invoice', 'material', 'color', 'alokasi__cmt')
+        .order_by('color__name', 'invoice__nomor', 'urut')
+    )
+    rows, dates = po_rows(po, rolls)
+    totals = {
+        'rolls': sum(row['rolls'] for row in rows),
+        'yard': sum((row['yard'] for row in rows), 0),
+        'hasil': sum(row['hasil'] for row in rows),
+        'sent': {date: sum(row['sent'].get(date, 0) for row in rows) for date in dates},
+        'done': sum(row['done'] for row in rows),
+    }
+    return render(
+        request,
+        'po_detail.html',
+        {
+            'title': po.nomor,
+            'active': 'po',
+            'po': po,
+            'rolls': rolls,
+            'rows': rows,
+            'dates': dates,
+            'totals': totals,
+            'balance': po_balance(po),
+            'form': PoForm(instance=po),
+            'colors': [row['color'] for row in rows],
+            'warehouses': Master.objects.filter(kind='warehouse', active=True),
+            'tgl_masuk': min((roll.tgl_terima for roll in rolls if roll.tgl_terima), default=None),
+            'materials': ', '.join(dict.fromkeys(roll.material.name for roll in rolls)),
+        },
+    )
+
+
+@access('purchasing', 'direktur')
+def roll_status(request):
+    if request.method != 'POST':
+        return HttpResponseNotAllowed(['POST'])
+    write_only(request)
+    ids = request.POST.getlist('roll')
+    action = request.POST.get('action', '')
+    actions = {
+        'terima': 'diterima',
+        'terpakai': 'terpakai',
+        'rusak': 'rusak',
+        'kembali': 'tersedia',
+        'koreksi': 'diterima',
+        'batal_kirim': 'siap_kirim',
+    }
+    try:
+        if action not in actions:
+            raise ValidationError('Aksi roll tidak dikenal.')
+        fields = {
+            'alasan': request.POST.get('alasan', ''),
+            'catatan': request.POST.get('alasan', ''),
+        }
+        if action == 'terima':
+            fields['tgl_terima'] = input_date(request.POST.get('tanggal'))
+        pindah_status(
+            ids,
+            actions[action],
+            request.user,
+            **fields,
+        )
+        messages.success(request, 'Status roll diperbarui.')
+    except (ValidationError, ValueError) as error:
+        messages.error(request, str(error))
+    return redirect(request.META.get('HTTP_REFERER', '/'))
+
+
+@access('admin')
+def accounts(request):
+    if request.method == 'POST':
+        action = request.POST.get('action')
+        try:
+            if action == 'create':
+                form = AccountForm(request.POST)
+                if not form.is_valid():
+                    raise ValidationError(
+                        '; '.join(
+                            f'{field}: {error}'
+                            for field, errors in form.errors.items()
+                            for error in errors
+                        )
+                    )
+                data = form.cleaned_data
+                user = User.objects.create_user(
+                    username=data['username'], password=data['password'], role=data['role']
+                )
+            else:
+                user = get_object_or_404(User, pk=request.POST.get('id'))
+                if user.pk == request.user.pk:
+                    raise ValidationError('Akun sendiri tidak dapat diubah di sini.')
+                if action == 'toggle':
+                    user.is_active = not user.is_active
+                elif action == 'role':
+                    if request.POST.get('role') not in User.Role.values:
+                        raise ValidationError('Peran tidak dikenal.')
+                    user.role = request.POST['role']
+                elif action == 'password':
+                    if len(request.POST.get('password', '')) < 6:
+                        raise ValidationError('Kata sandi minimal 6 karakter.')
+                    user.set_password(request.POST['password'])
+                else:
+                    raise ValidationError('Aksi akun tidak dikenal.')
+                user.save()
+            log(request.user, action, f'Akun {user.username}')
+            messages.success(request, 'Akun diperbarui.')
+        except (ValidationError, ValueError) as error:
+            messages.error(request, str(error))
+        return redirect('accounts')
+    return render(
+        request,
+        'accounts.html',
+        {
+            'title': 'Akun',
+            'active': 'accounts',
+            'users': User.objects.order_by('username'),
+            'form': AccountForm(),
+            'roles': User.Role.choices,
+        },
+    )
+
+
+@access('admin', 'direktur')
+def history(request):
+    rows = Log.objects.select_related('user').order_by('-waktu')
+    if request.GET.get('user', '').isdigit():
+        rows = rows.filter(user_id=request.GET['user'])
+    for key, lookup in [('from', 'waktu__date__gte'), ('to', 'waktu__date__lte')]:
+        if request.GET.get(key):
+            try:
+                value = date.fromisoformat(request.GET[key])
+            except ValueError:
+                continue
+            rows = rows.filter(**{lookup: value})
+    return render(
+        request,
+        'history.html',
+        {
+            'title': 'Riwayat',
+            'active': 'history',
+            'rows': rows[:200],
+            'users': User.objects.order_by('username'),
+        },
+    )
+
+
+def download_xlsx(name, headings, records):
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(headings)
+    for row in records:
+        sheet.append(row)
+    output = BytesIO()
+    workbook.save(output)
+    response = HttpResponse(
+        output.getvalue(),
+        content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    )
+    response['Content-Disposition'] = f'attachment; filename="{name}.xlsx"'
     return response
 
-@services.command(['admin'],User)
-def save_account(actor,data,password,pk=None):
-    users=list(User.objects.select_for_update().filter(Q(role='admin',is_active=True)|Q(pk=pk)).order_by('pk'))
-    obj=next((u for u in users if u.pk==pk),None) if pk else None
-    if pk and obj is None:
-        obj=User.objects.select_for_update().get(pk=pk)
-    if not obj:
-        obj=User()
-    if pk==actor.pk and (data['role']!='admin' or not data['is_active']):
-        raise ValidationError('Akun sendiri tidak dapat dinonaktifkan atau diturunkan rolenya.')
-    if obj.pk and obj.role=='admin' and (data['role']!='admin' or not data['is_active']) and len([u for u in users if u.role=='admin' and u.is_active])<=1:
-        raise ValidationError('Minimal satu Super Admin aktif harus tersedia.')
-    before={'role':obj.role,'active':obj.is_active} if obj.pk else {}
-    for k,v in data.items():
-        setattr(obj,k,v)
-    obj.can_adjust=obj.can_reopen=obj.role=='purchasing'
-    if password:
-        from django.contrib.auth.password_validation import validate_password
-        validate_password(password,obj)
-        obj.set_password(password)
-    elif not obj.pk:
-        raise ValidationError('Kata sandi wajib untuk akun baru.')
-    obj.is_staff=False; obj.is_superuser=False
-    obj.full_clean(); obj.save()
-    services.audit(actor,'update_account' if pk else 'create_account',obj,before,{'role':obj.role,'active':obj.is_active,'can_adjust':obj.can_adjust,'can_reopen':obj.can_reopen,'password_changed':bool(password)})
-    return obj
 
-def action_url(kind,obj,action):
-    return route('action',args=[kind,obj.pk,action])
+@access('purchasing', 'direktur')
+def invoice_export(request, pk):
+    invoice = get_object_or_404(Invoice, pk=pk)
+    rows = (
+        Roll.objects.filter(invoice=invoice)
+        .select_related('material', 'color', 'alokasi__po', 'alokasi__cmt')
+        .order_by('material__name', 'color__name', 'urut')
+    )
+    return download_xlsx(
+        f'invoice-{pk}',
+        [
+            'Invoice',
+            'Bahan',
+            'Warna',
+            'Roll',
+            'Yard',
+            'Status',
+            'PO',
+            'CMT',
+            'Tanggal kirim',
+            'Tanggal terima',
+        ],
+        [
+            [
+                invoice.nomor,
+                roll.material.name,
+                roll.color.name,
+                roll.urut,
+                roll.yard,
+                roll.get_status_display(),
+                roll.alokasi.po.nomor if roll.alokasi_id else '',
+                roll.alokasi.cmt.name if roll.alokasi_id else '',
+                roll.tgl_kirim,
+                roll.tgl_terima,
+            ]
+            for roll in rows
+        ],
+    )
 
-@login_required
-def detail(request,kind,pk):
-    if kind not in MODEL_MAP or kind=='audit':
-        raise Http404()
-    access(request,kind)
-    obj=get_object_or_404(MODEL_MAP[kind],pk=pk)
-    purchasing=request.user.role=='purchasing'
-    actions=[]; sections=[]; metrics=[]
-    def add(label,action):
-        actions.append({'label':label,'url':action_url(kind,obj,action)})
-    def direct(label,link):
-        actions.append({'label':label,'url':link})
-    if (purchasing and kind in ['masters','receipts','orders','allocations','shipments'] and (not hasattr(obj,'status') or obj.status=='draft')) or (kind=='accounts' and request.user.role=='admin'):
-        direct('Ubah',route('edit',args=[kind,pk]))
-    if kind=='receipts':
-        if purchasing and obj.status=='draft':
-            add('Posting penerimaan','post'); add('Batalkan','cancel')
-        elif purchasing and obj.status=='posted':
-            add('Reversal','reverse')
-        sections.append({'title':'Rincian bahan','headers':['Bahan / warna','Lokasi','Roll','Yard','Lot'],'rows':[row(l,[cell(l.material.name,sub=l.color.name),cell(l.warehouse.name),cell(number(l.rolls),numeric=True),cell(number(l.yards,2),numeric=True),cell(l.lot.code,url(l.lot)) if hasattr(l,'lot') else cell('Belum diposting')]) for l in obj.lines.select_related('material','color','warehouse','lot')]})
-    elif kind=='allocations':
-        if purchasing and obj.status=='draft':
-            add('Alokasikan bahan','allocate')
-        if purchasing and obj.status in ['allocated','partially_shipped'] and not obj.source_order_id:
-            direct('Kirim bahan',f'/shipments/new/?allocation={obj.pk}')
-        if purchasing and obj.status not in ['fully_shipped','rejected','cancelled']:
-            add('Batalkan alokasi','cancel')
-        rows=[]
-        for l in obj.lines.select_related('lot','warehouse'):
-            free=services.available(l.lot,l.warehouse,obj.source_order)
-            rem=services.allocation_remaining(l)
-            rows.append(row(l,[cell(l.lot.code,url(l.lot),sub=f'BARIS-{l.pk}'),cell(l.warehouse.name),cell(number(l.rolls),numeric=True),cell(number(l.yards,2),numeric=True),cell(number(free[1],2),sub=f'{free[0]} roll',numeric=True),cell(number(rem[1],2),sub=f'{rem[0]} roll',numeric=True)]))
-        sections.append({'title':'Bahan yang dialokasikan','headers':['Lot','Lokasi','Roll','Yard','Bebas saat ini','Sisa reservasi'],'rows':rows})
-        decisions=list(obj.decisions.select_related('actor'))
-        if decisions:
-            sections.append({'title':'Riwayat persetujuan lama','headers':['Keputusan','Pengguna','Tanggal','Catatan'],'rows':[row(d,[cell(d.decision,status=True),cell(d.actor.username),cell(date(timezone.localtime(d.created_at))),cell(d.notes or '—')]) for d in decisions]})
-        sections.append({'title':'Pengiriman','headers':['Referensi','Surat jalan','Status'],'rows':[row(s,[cell(str(s),url(s)),cell(s.delivery_note),cell(s.status,status=True)]) for s in obj.shipments.all()]})
-    elif kind=='shipments':
-        if purchasing and obj.status=='draft':
-            add('Posting pengiriman','dispatch')
-        if purchasing and obj.status not in ['draft','reversed']:
-            add('Reversal pengiriman','reverse')
-        rows=[]
-        for l in obj.lines.select_related('allocation_line__lot'):
-            rem=services.shipment_balance(l)
-            rows.append(row(l,[cell(l.allocation_line.lot.code,url(l.allocation_line.lot)),cell(number(l.rolls),numeric=True),cell(number(l.yards,2),numeric=True),cell(number(rem[1],2),sub=f'{rem[0]} roll',numeric=True),cell('Catat penerimaan',f'/cmt/new/?line={l.pk}') if purchasing and obj.status in ['dispatched','partially_received','discrepancy'] else cell('—')]))
-        sections.append({'title':'Rincian pengiriman','headers':['Lot','Roll dikirim','Yard dikirim','Sisa perjalanan','Laporan CMT'],'rows':rows})
-        sections.append({'title':'Penerimaan CMT','headers':['Tanggal','PIC','Roll','Yard','Kondisi'],'rows':[row(r,[cell(date(r.report_date),url(r)),cell(r.pic),cell(number(r.rolls),numeric=True),cell(number(r.yards,2),numeric=True),cell('reversed' if r.reversed else r.get_condition_display(),status=True)]) for r in CMTReceipt.objects.filter(shipment_line__shipment=obj)]})
-    elif kind=='orders':
-        t=services.totals(obj)
-        metrics=[('Target',obj.target),('Good diterima',t['good']),('Reject',t['reject']),('Sisa target',t['remaining']),('Kelebihan',t['over'])]
-        if purchasing:
-            if obj.status=='draft':
-                add('Aktifkan PO','activate')
-            elif obj.status not in ['closed','cancelled']:
-                direct('Alokasikan bahan',f'/allocations/new/?order={pk}')
-                direct('Catat progres',f'/progress/new/?order={pk}')
-                direct('Kirim hasil',f'/finished/new/?order={pk}')
-                add('Tutup PO','close')
-                if t['over'] and not obj.over_resolved:
-                    add('Selesaikan kelebihan hasil','resolve_over')
-            if obj.status not in ['closed','cancelled']:
-                add('Batalkan PO','cancel')
-            elif not obj.archived:
-                add('Arsipkan','archive')
-            if obj.status=='closed':
-                add('Buka kembali','reopen')
-        for report_kind in ['allocations','shipments','progress','finished','warehouse','reconciliation']:
-            headers,rows=dataset(report_kind,{'order':obj},request.user)
-            sections.append({'title':TITLES[report_kind],'headers':headers,'rows':rows})
-        transfers=obj.transfer_allocations.select_related('order','cmt').all()
-        if transfers.exists():
-            sections.append({'title':'Transfer bahan keluar','headers':['Alokasi','PO tujuan','CMT','Status'],'rows':[row(al,[cell(str(al),url(al)),cell(al.order.number,url(al.order)),cell(al.cmt.name),cell(al.status,status=True)]) for al in transfers]})
-    elif kind=='stock':
-        headers,rows=dataset('movements',{},request.user,{'lot':obj.pk})
-        sections.append({'title':'Kartu stok lot','headers':headers,'rows':rows})
-        if purchasing:
-            direct('Adjustment',f'/adjustment/?lot={obj.pk}')
-    elif kind=='finished':
-        if purchasing and obj.status!='received' and obj.order.status not in ['closed','cancelled']:
-            direct('Terima hasil',f'/warehouse/new/?shipment={pk}')
-        sections.append({'title':'Penerimaan gudang','headers':['Tanggal','Good','Reject','Diterima','PIC'],'rows':[row(r,[cell(date(r.report_date),url(r)),cell(number(r.good),numeric=True),cell(number(r.reject),numeric=True),cell(number(r.received),numeric=True),cell(r.pic)]) for r in obj.receipts.filter(reversed=False)]})
-    elif kind=='exceptions' and not obj.resolved and purchasing:
-        add('Selesaikan selisih','resolve')
-    elif kind in ['cmt','warehouse','reconciliation'] and purchasing and not obj.reversed:
-        add('Reversal','reverse')
-    fields=[]
-    if kind=='receipts':
-        fields.append(('Referensi invoice',cell(f'INV-{obj.pk}')))
-    omit=['id','password','is_staff','is_superuser','can_adjust','can_reopen','version','created_at','updated_at','created_by','evidence','last_login','date_joined','over_resolved']
-    for f in obj._meta.fields:
-        if f.name in omit:
-            continue
-        value=getattr(obj,f.name)
-        if value in [None,'']:
-            continue
-        label=forms.LABELS.get(f.name,{'status':'Status','reversed':'Direversal','archived':'Diarsipkan','resolved':'Selesai','resolution':'Penyelesaian','description':'Selisih','reason':'Alasan','allocation':'Alokasi','receipt_line':'Asal bahan','shipment_line':'Baris pengiriman','receipt':'Penerimaan bahan','correction':'Koreksi'}.get(f.name,f.verbose_name))
-        if f.is_relation:
-            fields.append((label,cell(str(value),url(value))))
-        elif f.choices:
-            fields.append((label,cell(getattr(obj,'get_'+f.name+'_display')())))
-        elif isinstance(value,bool):
-            fields.append((label,cell('Ya' if value else 'Tidak')))
-        elif isinstance(value,Decimal):
-            fields.append((label,cell(number(value,2))))
-        elif f.name=='status':
-            fields.append((label,cell(value,status=True)))
-        else:
-            fields.append((label,cell(value)))
-    if kind=='orders':
-        fields.append(('CMT',cell(', '.join(o.name for o in obj.cmts.all()) or 'Semua CMT aktif')))
-    return render(request,'detail.html',{'title':str(obj) if kind in ['receipts','orders','allocations','shipments','finished','stock','masters'] else TITLES[kind],'active':kind,'kind':kind,'object':obj,'fields':fields,'actions':actions,'sections':sections,'metrics':metrics,'evidence':getattr(obj,'evidence',None),'events':Audit.objects.filter(entity=type(obj).__name__,object_id=str(pk)).select_related('actor')[:20] if request.user.role in ['purchasing','admin'] else [],'back_url':f'/{kind}/'})
 
-ACTION_LABELS={'post':'Posting penerimaan','dispatch':'Posting pengiriman','allocate':'Alokasikan bahan','cancel':'Batalkan transaksi','reverse':'Reversal transaksi','activate':'Aktifkan PO','close':'Tutup PO','reopen':'Buka kembali PO','resolve_over':'Selesaikan kelebihan hasil','archive':'Arsipkan PO','resolve':'Selesaikan selisih'}
+@access('purchasing', 'direktur')
+def po_export(request, pk):
+    po = get_object_or_404(Po, pk=pk)
+    rolls = list(Roll.objects.filter(alokasi__po=po).select_related('invoice', 'color'))
+    rows, dates = po_rows(po, rolls)
+    return download_xlsx(
+        f'po-{pk}',
+        [
+            'PO',
+            'Invoice',
+            'Surat jalan',
+            'Warna',
+            'Roll',
+            'Yard',
+            'Hasil',
+            *[date.isoformat() for date in dates],
+            'DONE',
+            'Pemakaian',
+        ],
+        [
+            [
+                po.nomor,
+                row['invoices'],
+                row['surat_jalan'],
+                row['color'].name,
+                row['rolls'],
+                row['yard'],
+                row['hasil'],
+                *[row['sent'].get(date, 0) for date in dates],
+                row['done'],
+                row['pemakaian'] if row['pemakaian'] else '',
+            ]
+            for row in rows
+        ],
+    )
 
-@login_required
-def action(request,kind,pk,action):
-    allowed={'receipts':['post','cancel','reverse'],'orders':['activate','cancel','close','reopen','resolve_over','archive'],'allocations':['allocate','cancel'],'shipments':['dispatch','reverse'],'cmt':['reverse'],'warehouse':['reverse'],'reconciliation':['reverse'],'exceptions':['resolve']}
-    if action not in allowed.get(kind,[]):
-        raise Http404()
-    services.require(request.user,['purchasing'])
-    obj=get_object_or_404(MODEL_MAP[kind],pk=pk)
-    form_class=forms.ResolutionForm if action=='resolve' else forms.ActionForm
-    form=form_class(request.POST or None,request.FILES or None)
-    if action in ['post','dispatch','allocate','activate','close','archive']:
-        form.fields.pop('reason'); form.fields.pop('attachment')
-    impact={'post':'Posting menambah stok fisik sesuai seluruh rincian penerimaan. Data posted dikunci.','dispatch':'Posting mengurangi stok fisik dan reservasi; bahan masuk stok dalam perjalanan.','allocate':'Sistem memeriksa stok bebas dan langsung mereservasi bahan untuk PO ini. Rincian alokasi dikunci setelah berhasil. Stok fisik tetap sampai pengiriman dicatat.','cancel':'Transaksi dibatalkan. Sisa reservasi alokasi dilepas; riwayat tetap tersimpan.','reverse':'Dampak transaksi dibalik dengan pergerakan lawan. Reversal ditolak bila stok sudah dipakai.','close':'PO dikunci setelah target good, penerimaan, dan rekonsiliasi bahan selesai.','resolve':'Selisih diselesaikan dengan bukti. Kehilangan mengurangi sisa perjalanan, tanpa menambah good.','resolve_over':'Kelebihan hasil tetap ditampilkan. Alasan ini mengizinkan penutupan setelah syarat lain selesai.','archive':'PO tersimpan di arsip dan tetap dapat ditelusuri.','activate':'PO dapat digunakan untuk alokasi dan produksi.','reopen':'PO dapat menerima transaksi lagi. Alasan dan pengguna akan dicatat.'}[action]
-    if request.method=='POST' and form.is_valid():
-        try:
-            with transaction.atomic():
-                data=form.cleaned_data; token=data['token']
-                previous=Operation.objects.filter(key=token,actor=request.user,result_id__isnull=False).exists()
-                evidence=None if previous else storage.upload(request.user,data.get('attachment')); reason=data.get('reason','')
-                if action=='reverse':
-                    services.reverse(request.user,{'receipts':'receipt','shipments':'shipment','cmt':'cmt_receipt','warehouse':'warehouse_receipt','reconciliation':'reconciliation'}[kind],pk,reason,evidence,key=token)
-                elif kind=='receipts':
-                    services.post_receipt(request.user,pk,key=token) if action=='post' else services.cancel_receipt(request.user,pk,reason,key=token)
-                elif kind=='orders':
-                    services.order_action(request.user,pk,action,reason,evidence,key=token)
-                elif kind=='allocations':
-                    if action=='allocate':
-                        services.post_allocation(request.user,pk,key=token)
-                    else:
-                        services.cancel_allocation(request.user,pk,reason,key=token)
-                elif kind=='shipments':
-                    services.dispatch(request.user,pk,key=token)
-                else:
-                    services.resolve_discrepancy(request.user,pk,data['resolution'],reason,evidence,data['rolls'],data['yards'],key=token)
-                messages.success(request,'Tindakan berhasil dicatat.')
-                return redirect(url(obj))
-        except ValidationError as error:
-            form.add_error(None,error)
-        except IntegrityError:
-            form.add_error(None,'Data berubah atau permintaan duplikat. Muat ulang detail transaksi.')
-    summary=[]
-    if kind in ['receipts','shipments','allocations']:
-        q=obj.lines.aggregate(r=Sum('rolls'),y=Sum('yards'))
-        summary=[('Roll',number(q['r'] or 0)),('Yard',number(q['y'] or ZERO,2))]
-    return render(request,'form.html',{'title':ACTION_LABELS[action],'subtitle':str(obj),'active':kind,'form':form,'impact':impact,'summary':summary,'back_url':url(obj),'submit_label':ACTION_LABELS[action]},status=400 if request.method=='POST' else 200)
 
-@login_required
-def adjustment(request):
-    services.require(request.user,['purchasing'])
-    form=forms.AdjustmentForm(request.POST or None,request.FILES or None,initial={'lot':request.GET.get('lot')})
-    if request.method=='POST' and form.is_valid():
-        try:
-            with transaction.atomic():
-                data=form.cleaned_data
-                evidence=storage.upload(request.user,data.get('attachment'))
-                obj=services.adjust(request.user,data['lot'],data['warehouse'],data['direction'],data['rolls'],data['yards'],data['reason'],evidence,key=data['token'])
-                messages.success(request,'Adjustment dicatat pada kartu stok.')
-                return redirect(url(obj))
-        except ValidationError as error:
-            form.add_error(None,error)
-    return render(request,'form.html',{'title':'Adjustment bahan','active':'stock','form':form,'impact':'Adjustment menambah atau mengurangi stok fisik. Alasan, bukti, serta saldo sebelum dan sesudah dicatat.','submit_label':'Posting adjustment','back_url':'/stock/'},status=400 if request.method=='POST' else 200)
+def forbidden(request, exception):
+    return render(
+        request, 'error.html', {'title': 'Akses ditolak', 'text': 'Akses ditolak.'}, status=403
+    )
 
-@login_required
-def download_evidence(request,pk):
-    evidence=get_object_or_404(Evidence,pk=pk)
-    try:
-        return FileResponse(storage.read(evidence),as_attachment=True,filename=evidence.name,content_type=evidence.mime_type)
-    except ValidationError as error:
-        return render(request,'error.html',{'title':'Lampiran belum tersedia','error':'; '.join(error.messages)},status=503)
 
-def forbidden(request,exception=None):
-    return render(request,'error.html',{'title':'Akses dibatasi','error':str(exception) or 'Akun ini tidak memiliki izin untuk tindakan tersebut.'},status=403)
+def not_found(request, exception):
+    return render(
+        request,
+        'error.html',
+        {'title': 'Tidak ditemukan', 'text': 'Halaman tidak ditemukan.'},
+        status=404,
+    )
 
-def not_found(request,exception=None):
-    return render(request,'error.html',{'title':'Data tidak ditemukan','error':'Periksa kembali tautan atau buka daftar transaksi.'},status=404)
 
 def server_error(request):
-    logging.getLogger(__name__).error('Server error request_id=%s',getattr(request,'request_id',''))
-    return render(request,'error.html',{'title':'Permintaan belum dapat diproses','error':'Data belum berubah jika transaksi gagal. Coba kembali atau sampaikan kode permintaan kepada administrator.'},status=500)
+    return render(
+        request,
+        'error.html',
+        {'title': 'Terjadi kesalahan', 'text': 'Terjadi kesalahan. Coba kembali.'},
+        status=500,
+    )

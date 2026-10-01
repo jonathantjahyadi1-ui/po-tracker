@@ -1,0 +1,23 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="page-head"><h1>Riwayat</h1></div>
+<form method="get" class="filters">
+  <div class="field"><label for="log-user">Pengguna</label>
+    <select id="log-user" name="user"><option value="">Semua</option>
+      {% for user in users %}<option value="{{ user.pk }}"
+      {% if request.GET.user == user.pk|stringformat:"s" %}selected{% endif %}>{{ user.username }}</option>
+      {% endfor %}</select></div>
+  <div class="field"><label for="log-from">Dari</label>
+    <input id="log-from" name="from" type="date" value="{{ request.GET.from }}"></div>
+  <div class="field"><label for="log-to">Sampai</label>
+    <input id="log-to" name="to" type="date" value="{{ request.GET.to }}"></div>
+  <button class="button" type="submit">Terapkan filter</button>
+</form>
+<section class="panel"><div class="table-wrap"><table><thead><tr><th>Waktu</th>
+  <th>Pengguna</th><th>Aksi</th><th>Objek</th><th>Detail</th></tr></thead><tbody>
+  {% for row in rows %}<tr><td class="nowrap">{{ row.waktu|date:"d M Y H:i" }}</td>
+    <td>{{ row.user.username }}</td><td>{{ row.aksi }}</td><td>{{ row.objek }}</td>
+    <td>{{ row.detail|default:"—" }}</td></tr>
+  {% empty %}<tr><td colspan="5" class="empty">Tidak ada riwayat pada filter ini.</td></tr>{% endfor %}
+  </tbody></table></div></section>
+{% endblock %}

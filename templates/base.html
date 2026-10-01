@@ -1,9 +1,66 @@
-{% load static tracker %}<!doctype html>
-<html lang="id"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="Pencatatan bahan, alokasi, dan PO produksi."><meta name="theme-color" content="#202923"><title>{{ title|default:'Masuk' }} · Rantai</title><link rel="icon" href="{% static 'favicon.svg' %}" type="image/svg+xml"><link rel="stylesheet" href="{% static 'app.css' %}"><script src="{% static 'app.js' %}" defer></script></head>
-<body>{% if request.user.is_authenticated %}
-<a class="skip" href="#main">Lewati ke konten</a>
-<aside class="sidebar" id="sidebar"><a class="brand" href="/"><span class="brand-icon">r.</span><span>rantai<span class="brand-caption">BAHAN & PRODUKSI</span></span></a><p class="nav-caption">RUANG KERJA</p><nav aria-label="Navigasi utama">{% for id,label,link,icon in navigation %}<a href="{{ link }}" class="nav-link {% if active == id %}is-active{% endif %}" {% if active == id %}aria-current="page"{% endif %}><span class="nav-icon" aria-hidden="true">{{ icon }}</span>{{ label }}</a>{% endfor %}</nav><div class="sidebar-bottom"><span class="environment">OPERASIONAL</span><div class="account"><span class="avatar">{{ request.user.username|first|upper }}</span><div><strong>{{ request.user.get_full_name|default:request.user.username }}</strong><small>{{ request.user.get_role_display }}</small></div></div><form action="{% url 'logout' %}" method="post">{% csrf_token %}<button class="logout" type="submit">Keluar <span aria-hidden="true">↗</span></button></form></div></aside>
-<div class="workspace"><header class="topbar"><div class="breadcrumb"><button class="menu-button" id="menu-toggle" aria-label="Buka navigasi" aria-expanded="false" aria-controls="sidebar">☰</button><span>Operasional</span><span class="slash">/</span><strong>{{ title|default:'Rantai' }}</strong></div><div class="topbar-right"><span>{{ today|date:'d M Y' }}</span><span class="topbar-divider"></span><span class="role-tag">{{ request.user.get_role_display }}</span></div></header><main id="main">{% else %}<main id="main" class="auth-main">{% endif %}
-{% if messages %}<div class="messages" aria-live="polite">{% for message in messages %}<div class="message {{ message.tags }}">{{ message }}</div>{% endfor %}</div>{% endif %}
-{% block content %}{% endblock %}</main>{% if request.user.is_authenticated %}<footer class="footer"><span>Rantai <span class="muted">/</span> Bahan & produksi</span><span>Waktu Asia/Jakarta</span></footer></div>{% endif %}
-</body></html>
+{% load static %}
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>{{ title|default:"Severli" }} · Severli</title>
+  <link rel="icon" href="{% static 'favicon.svg' %}" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{% static 'app.css' %}">
+  <script src="{% static 'app.js' %}" defer></script>
+</head>
+<body>
+{% if request.user.is_authenticated %}
+<a class="skip" href="#main">Lewati navigasi</a>
+<aside class="sidebar" id="sidebar">
+  <a class="brand" href="/">severli<span>PO TRACKER</span></a>
+  <nav aria-label="Navigasi utama">
+    {% if request.user.role != 'admin' %}
+    <a href="{% url 'dashboard' %}" {% if active == 'dashboard' %}aria-current="page"{% endif %}>Ringkasan</a>
+    <a href="{% url 'vendor_list' %}" {% if active == 'vendor' %}aria-current="page"{% endif %}>Vendor</a>
+    <a href="{% url 'allocation_list' %}" {% if active == 'allocation' %}aria-current="page"{% endif %}>Alokasi</a>
+    <a href="{% url 'cmt_list' %}" {% if active == 'cmt' %}aria-current="page"{% endif %}>CMT</a>
+    <a href="{% url 'po_list' %}" {% if active == 'po' %}aria-current="page"{% endif %}>PO</a>
+    <a href="{% url 'master' %}" {% if active == 'master' %}aria-current="page"{% endif %}>Master</a>
+    {% endif %}
+    {% if request.user.role == 'admin' or request.user.role == 'direktur' %}
+    <a href="{% url 'history' %}" {% if active == 'history' %}aria-current="page"{% endif %}>Riwayat</a>
+    {% endif %}
+    {% if request.user.role == 'admin' %}
+    <a href="{% url 'accounts' %}" {% if active == 'accounts' %}aria-current="page"{% endif %}>Akun</a>
+    {% endif %}
+  </nav>
+  <div class="side-bottom">
+    <strong>{{ request.user.username }}</strong>
+    <span>{{ request.user.get_role_display }}</span>
+    <form method="post" action="{% url 'logout' %}">{% csrf_token %}
+      <button type="submit" class="link-button">Keluar</button>
+    </form>
+  </div>
+</aside>
+<div class="workspace">
+  <header class="topbar">
+    <button class="menu-toggle" id="menu-toggle" type="button"
+      aria-controls="sidebar" aria-expanded="false" aria-label="Buka menu">Menu</button>
+    <span>{{ title }}</span>
+    <span class="top-user">{{ request.user.get_role_display }}</span>
+  </header>
+  <main id="main">
+{% else %}
+<main id="main" class="auth-main">
+{% endif %}
+{% if messages %}
+<div class="messages" aria-live="polite">
+  {% for message in messages %}<div class="message {{ message.tags }}">{{ message }}
+    <button type="button" aria-label="Tutup pesan" data-close-message>Tutup</button>
+  </div>{% endfor %}
+</div>
+{% endif %}
+{% block content %}{% endblock %}
+</main>
+{% if request.user.is_authenticated %}</div>{% endif %}
+</body>
+</html>

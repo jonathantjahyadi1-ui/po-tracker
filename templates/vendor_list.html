@@ -1,0 +1,18 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="page-head"><h1>Vendor</h1>{% if request.user.role == 'purchasing' %}
+  <a class="button primary" href="{% url 'invoice_new' %}">Tambah bahan</a>{% endif %}</div>
+<section class="panel"><div class="table-wrap"><table><thead><tr><th>Vendor</th>
+  <th>Jenis bahan</th><th class="num">Total roll</th><th class="num">Tersedia</th>
+  <th class="num">Sudah dialokasikan</th><th>Kirim terakhir</th></tr></thead><tbody>
+  {% for vendor in vendors %}<tr><td><a class="ref" href="{% url 'vendor_detail' vendor.pk %}">{{ vendor.name }}</a></td>
+  <td>{{ vendor.materials|default:"—" }}</td>
+  <td class="num">{{ vendor.summary.rolls|default:0 }}</td>
+  <td class="num">{{ vendor.summary.available|default:0 }}</td>
+  <td class="num">{{ vendor.summary.allocated|default:0 }}</td>
+  <td>{{ vendor.summary.last_send|date:"d M Y"|default:"—" }}</td></tr>
+  {% empty %}<tr><td colspan="6" class="empty">Belum ada vendor.
+    {% if request.user.role == 'purchasing' %}<a href="{% url 'invoice_new' %}">Tambah bahan</a>{% endif %}
+  </td></tr>{% endfor %}
+  </tbody></table></div></section>
+{% endblock %}

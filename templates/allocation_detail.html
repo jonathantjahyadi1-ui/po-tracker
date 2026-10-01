@@ -1,0 +1,43 @@
+{% extends 'base.html' %}{% load tracker %}
+{% block content %}
+<div class="page-head"><div><a class="back" href="{% url 'allocation_list' %}">Alokasi</a>
+  <h1>{{ allocation.po.nomor }}</h1><p>{{ allocation.cmt.name }} ·
+  {% include 'partials/status.html' with item=allocation %}</p></div></div>
+{% if request.user.role == 'purchasing' and allocation.status == 'menunggu' %}
+<div class="row-actions section-gap">
+  <form method="post" data-submit-form>{% csrf_token %}
+    <button class="button primary" name="action" value="acc">ACC alokasi</button></form>
+  <form method="post" data-submit-form>{% csrf_token %}
+    <label for="reject-reason">Alasan</label><input id="reject-reason" name="alasan" required>
+    <button class="button danger" name="action" value="tolak">Tolak</button></form>
+</div>{% endif %}
+{% if request.user.role == 'purchasing' and allocation.status == 'disetujui' %}
+<form method="post" class="inline-form section-gap" data-submit-form>{% csrf_token %}
+  <label for="cancel-reason">Alasan pembatalan</label><input id="cancel-reason" name="alasan" required>
+  <button class="button danger" name="action" value="batalkan">Batalkan alokasi</button>
+</form>{% endif %}
+<form method="post" data-submit-form>{% csrf_token %}
+  <section class="panel section-gap"><div class="table-wrap"><table><thead><tr>
+    {% if request.user.role == 'purchasing' %}<th><input type="checkbox" id="select-all" aria-label="Pilih semua roll"></th>{% endif %}
+    <th>Invoice</th><th>Bahan</th><th>Warna</th><th class="num">Roll</th>
+    <th class="num">Yard</th><th>Status</th><th>Tgl kirim</th><th>Tgl terima</th>
+  </tr></thead><tbody>{% for roll in rolls %}<tr>
+    {% if request.user.role == 'purchasing' %}<td><input type="checkbox" name="roll" value="{{ roll.pk }}"
+      aria-label="Pilih roll {{ roll.urut }}"></td>{% endif %}
+    <td>{{ roll.invoice.nomor }}</td><td>{{ roll.material.name }}</td>
+    <td>{{ roll.color.name }}</td><td class="num">{{ roll.urut }}</td>
+    <td class="num">{{ roll.yard|indo }}</td>
+    <td>{% include 'partials/status.html' with item=roll %}</td>
+    <td>{{ roll.tgl_kirim|date:"d M Y"|default:"—" }}</td>
+    <td>{{ roll.tgl_terima|date:"d M Y"|default:"—" }}</td></tr>{% endfor %}
+  </tbody></table></div></section>
+  {% if request.user.role == 'purchasing' and allocation.status == 'disetujui' %}
+  <div class="inline-form section-gap"><div class="field"><label for="action-date">Tanggal</label>
+    <input id="action-date" name="tanggal" type="date"></div>
+    <div class="field"><label for="send-note">Surat jalan (opsional)</label>
+      <input id="send-note" name="surat_jalan"></div>
+    <button class="button primary" name="action" value="kirim">Kirim roll terpilih</button>
+    <button class="button" name="action" value="terima">Terima roll terpilih</button>
+  </div>{% endif %}
+</form>
+{% endblock %}

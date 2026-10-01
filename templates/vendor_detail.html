@@ -1,0 +1,30 @@
+{% extends 'base.html' %}{% load tracker %}
+{% block content %}
+<div class="page-head"><div><a class="back" href="{% url 'vendor_list' %}">Vendor</a>
+  <h1>{{ vendor.name }}</h1></div>{% if request.user.role == 'purchasing' %}
+  <a class="button primary" href="{% url 'invoice_new' %}">Tambah bahan</a>{% endif %}</div>
+{% for invoice in invoices %}
+<section class="panel section-gap">
+  <div class="panel-head"><div><h2><a href="{% url 'invoice_detail' invoice.pk %}">{{ invoice.nomor }}</a></h2>
+    <p>Surat jalan {{ invoice.surat_jalan|default:"—" }} · {{ invoice.tanggal|date:"d M Y" }}
+      · Rp {{ invoice.total_rp|indo }} · {{ invoice.yards|indo }} yd</p></div>
+    <a href="{% url 'invoice_detail' invoice.pk %}">Lihat roll</a></div>
+  <div class="table-wrap"><table><thead><tr><th>Bahan / warna</th>
+    <th class="num">Roll</th><th class="num">Yard</th>
+    {% for date in invoice.dates %}<th>{{ date|date:"d M Y" }}</th>{% endfor %}
+    <th>Dialokasikan, belum kirim</th><th class="num">Sisa tersedia</th>
+  </tr></thead><tbody>{% for row in invoice.rows %}
+  <tr><td>{{ row.material.name }} / {{ row.color.name }}</td>
+    <td class="num">{{ row.rolls }}</td><td class="num">{{ row.yard|indo }}</td>
+    {% for date in invoice.dates %}<td>
+      {% with sent=row.sent|get:date %}{% for cmt,count in sent.items %}
+      <span class="nowrap">{{ count }} roll → {{ cmt }}</span><br>
+      {% endfor %}{% endwith %}</td>{% endfor %}
+    <td>{% for cmt,count in row.pending.items %}{{ count }} roll · {{ cmt }}<br>{% endfor %}</td>
+    <td class="num">{{ row.available }}</td></tr>{% endfor %}
+  </tbody></table></div>
+</section>
+{% empty %}<section class="panel empty">Belum ada invoice untuk vendor ini.
+  {% if request.user.role == 'purchasing' %}<a href="{% url 'invoice_new' %}">Tambah bahan</a>{% endif %}
+</section>{% endfor %}
+{% endblock %}

@@ -1,0 +1,110 @@
+{% extends 'base.html' %}{% load tracker %}
+{% block content %}
+<div class="page-head"><div><a class="back" href="{% url 'po_list' %}">PO</a>
+  <h1>{{ po.nomor }}</h1><p>{% if po.selesai %}Selesai{% elif balance %}Balance{% else %}Belum balance{% endif %}</p></div>
+  <a class="button" href="{% url 'po_export' po.pk %}">Unduh Excel</a></div>
+<section class="panel form-section"><div class="panel-head"><h2>Informasi PO</h2></div>
+  <div class="meta-line"><span>Tanggal masuk CMT: {{ tgl_masuk|date:"d M Y"|default:"—" }}</span>
+    <span>Bahan: {{ materials|default:"—" }}</span></div>
+  {% if request.user.role == 'purchasing' and not po.selesai %}
+  <form method="post" data-submit-form>{% csrf_token %}<input type="hidden" name="action" value="edit">
+    <div class="field-grid">{% for field in form %}
+      <div class="field {% if field.name == 'catatan' %}wide{% endif %}">
+        <label for="{{ field.id_for_label }}">{{ field.label }}</label>{{ field }}{{ field.errors }}
+      </div>{% endfor %}</div>
+    <div class="form-actions"><button class="button" type="submit">Simpan info PO</button></div>
+  </form>
+  {% else %}<div class="meta-line"><span>Tanggal order:
+    {{ po.tgl_order|date:"d M Y"|default:"—" }}</span><span>Produk: {{ po.produk|default:"—" }}</span>
+    <span>Pemakaian std: {{ po.pemakaian_std|default:"—" }}</span></div>{% endif %}
+</section>
+<section class="panel section-gap"><div class="table-wrap"><table><thead><tr>
+  <th>Invoice</th><th>Surat jalan</th><th>Warna</th>
+  <th class="num">Roll</th><th class="num">Yard</th><th class="num">Hasil</th>
+  {% for date in dates %}<th class="num">{{ date|date:"d M Y" }}</th>{% endfor %}
+  <th class="num">DONE</th><th class="num">Pemakaian</th></tr></thead><tbody>
+  {% for row in rows %}<tr><td>{{ row.invoices }}</td><td>{{ row.surat_jalan|default:"—" }}</td>
+    <td>{{ row.color.name }}</td><td class="num">{{ row.rolls }}</td>
+    <td class="num">{{ row.yard|indo }}</td><td class="num">
+    {% if request.user.role == 'purchasing' and not po.selesai %}
+      <form method="post" class="inline-result" data-submit-form>{% csrf_token %}
+        <input type="hidden" name="action" value="hasil">
+        <input type="hidden" name="color" value="{{ row.color.pk }}">
+        <label class="sr-only" for="hasil-{{ row.color.pk }}">Hasil {{ row.color.name }}</label>
+        <input id="hasil-{{ row.color.pk }}" type="number" min="0" name="pcs" value="{{ row.hasil }}">
+        <button class="button small" type="submit">Simpan</button></form>
+    {% else %}{{ row.hasil }}{% endif %}</td>
+    {% for date in dates %}<td class="num">{{ row.sent|get:date|default:0 }}</td>{% endfor %}
+    <td class="num {% if row.done < 0 %}negative{% endif %}">
+      {% if row.done < 0 %}Kelebihan {{ row.done|stringformat:"+d"|slice:"1:" }} pcs
+      {% else %}{{ row.done }}{% endif %}</td>
+    <td class="num">{% if row.pemakaian %}{{ row.pemakaian|indo }}{% else %}—{% endif %}</td></tr>
+  {% empty %}<tr><td colspan="8" class="empty">Belum ada roll untuk PO ini.</td></tr>{% endfor %}
+  {% if rows %}<tr class="total-row"><td colspan="3">Total</td>
+    <td class="num">{{ totals.rolls }}</td><td class="num">{{ totals.yard|indo }}</td>
+    <td class="num">{{ totals.hasil }}</td>
+    {% for date in dates %}<td class="num">{{ totals.sent|get:date }}</td>{% endfor %}
+    <td class="num">{{ totals.done }}</td><td class="num">—</td></tr>{% endif %}
+  </tbody></table></div></section>
+{% if request.user.role == 'purchasing' and not po.selesai %}
+<section class="panel form-section section-gap"><h2>Catat pengiriman ke gudang</h2>
+  <form method="post" data-submit-form>{% csrf_token %}
+    <input type="hidden" name="action" value="kirim">
+    <div class="field-grid three">
+      <div class="field"><label for="ship-date">Tanggal</label>
+        <input id="ship-date" type="date" name="tanggal" required></div>
+      <div class="field"><label for="ship-color">Warna</label><select id="ship-color" name="color" required>
+        <option value="">Pilih warna</option>{% for color in colors %}
+        <option value="{{ color.pk }}">{{ color.name }}</option>{% endfor %}</select></div>
+      <div class="field"><label for="ship-pcs">Pcs</label>
+        <input id="ship-pcs" type="number" min="1" name="pcs" required></div>
+      <div class="field"><label for="ship-warehouse">Gudang</label>
+        <select id="ship-warehouse" name="gudang"><option value="">Pilih gudang</option>
+        {% for item in warehouses %}<option value="{{ item.pk }}">{{ item.name }}</option>{% endfor %}
+        </select></div>
+      <div class="field"><label for="ship-sj">Surat jalan</label>
+        <input id="ship-sj" name="surat_jalan"></div>
+      <div class="field"><label for="ship-note">Catatan</label>
+        <input id="ship-note" name="catatan"></div>
+    </div><div class="form-actions"><button class="button primary" type="submit">Simpan pengiriman</button></div>
+  </form>
+</section>
+{% endif %}
+<section class="panel section-gap"><div class="panel-head"><h2>Roll PO</h2></div>
+  <form method="post" action="{% url 'roll_status' %}" data-submit-form>{% csrf_token %}
+    <div class="table-wrap"><table><thead><tr>
+      {% if request.user.role == 'purchasing' and not po.selesai %}
+      <th><input type="checkbox" id="select-all" aria-label="Pilih semua roll"></th>{% endif %}
+      <th>Invoice</th><th>Warna</th><th class="num">Roll</th><th class="num">Yard</th>
+      <th>Status</th><th>CMT</th><th>Tgl kirim</th><th>Tgl terima</th></tr></thead><tbody>
+      {% for roll in rolls %}<tr>
+      {% if request.user.role == 'purchasing' and not po.selesai %}
+      <td><input type="checkbox" name="roll" value="{{ roll.pk }}" aria-label="Pilih roll {{ roll.urut }}"></td>
+      {% endif %}
+      <td>{{ roll.invoice.nomor }}</td><td>{{ roll.color.name }}</td>
+      <td class="num">{{ roll.urut }}</td><td class="num">{{ roll.yard|indo }}</td>
+      <td>{% include 'partials/status.html' with item=roll %}</td>
+      <td>{{ roll.alokasi.cmt.name }}</td>
+      <td>{{ roll.tgl_kirim|date:"d M Y"|default:"—" }}</td>
+      <td>{{ roll.tgl_terima|date:"d M Y"|default:"—" }}</td></tr>{% endfor %}
+      </tbody></table></div>
+    {% if request.user.role == 'purchasing' and not po.selesai %}
+    <div class="roll-actions"><div class="field"><label for="roll-date">Tanggal terima</label>
+      <input id="roll-date" type="date" name="tanggal"></div>
+      <div class="field"><label for="roll-reason">Alasan / catatan</label>
+      <input id="roll-reason" name="alasan"></div>
+      <div class="row-actions"><button class="button" name="action" value="terima">Terima CMT</button>
+        <button class="button" name="action" value="terpakai">Tandai terpakai</button>
+        <button class="button" name="action" value="rusak">Tandai rusak</button>
+        <button class="button" name="action" value="kembali">Kembalikan ke stok</button>
+        <button class="button" name="action" value="batal_kirim">Batalkan pengiriman</button>
+        <button class="button" name="action" value="koreksi">Koreksi</button></div></div>
+    {% endif %}
+  </form>
+</section>
+{% if request.user.role == 'purchasing' and not po.selesai %}
+<form method="post" class="section-gap" data-submit-form>{% csrf_token %}
+  <button class="button" name="action" value="selesai" type="submit"
+    {% if not balance %}disabled{% endif %}>Tandai PO selesai</button>
+</form>{% endif %}
+{% endblock %}

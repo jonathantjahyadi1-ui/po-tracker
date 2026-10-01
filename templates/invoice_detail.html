@@ -1,0 +1,68 @@
+{% extends 'base.html' %}{% load tracker %}
+{% block content %}
+<div class="page-head"><div><a class="back" href="{% url 'vendor_detail' invoice.vendor_id %}">{{ invoice.vendor.name }}</a>
+  <h1>{{ invoice.nomor }}</h1><p>{{ invoice.tanggal|date:"d M Y" }} ·
+  {{ roll_count }} roll · {{ yard_total|indo }} yd</p></div>
+  <div class="row-actions"><a class="button" href="{% url 'invoice_export' invoice.pk %}">Unduh Excel</a>
+  {% if request.user.role == 'purchasing' and not invoice.dibatalkan %}
+  <a class="button primary" href="{% url 'invoice_edit' invoice.pk %}">Ubah invoice</a>{% endif %}</div></div>
+<div class="meta-line"><span>Surat jalan: {{ invoice.surat_jalan|default:"—" }}</span>
+  <span>Total Rp: {{ invoice.total_rp|indo }}</span><span>{{ invoice.catatan }}</span></div>
+{% if invoice.dibatalkan %}<p class="message error">Invoice dibatalkan.</p>{% endif %}
+<form method="post" action="{% url 'allocation_create' %}" id="allocation-form" data-submit-form>
+  {% csrf_token %}
+  <section class="panel"><div class="table-wrap"><table><thead><tr>
+    {% if request.user.role == 'purchasing' and not invoice.dibatalkan %}
+    <th><input type="checkbox" id="select-all" aria-label="Pilih semua yang tersedia"></th>
+    {% endif %}
+    <th>Bahan</th><th>Warna</th><th class="num">Roll</th><th class="num">Yard</th>
+    <th>Lokasi</th><th>Status</th><th>CMT</th><th>PO</th><th>Tgl kirim</th>
+  </tr></thead><tbody>{% for roll in rolls %}
+    {% ifchanged roll.material_id roll.color_id %}
+    <tr class="group-row"><td colspan="10">
+      {% if request.user.role == 'purchasing' and not invoice.dibatalkan %}
+      <label><input type="checkbox" data-select-group="{{ roll.material_id }}-{{ roll.color_id }}">
+        Pilih semua yang tersedia · {{ roll.material.name }} / {{ roll.color.name }}</label>
+      {% else %}{{ roll.material.name }} / {{ roll.color.name }}{% endif %}
+    </td></tr>{% endifchanged %}
+    <tr class="{% if roll.tgl_kirim %}sent-row{% endif %}">
+    {% if request.user.role == 'purchasing' and not invoice.dibatalkan %}
+    <td>{% if roll.status == 'tersedia' %}<input type="checkbox" name="roll"
+      value="{{ roll.pk }}" data-yard="{{ roll.yard }}"
+      data-group="{{ roll.material_id }}-{{ roll.color_id }}"
+      aria-label="Pilih roll {{ roll.urut }}">
+      {% endif %}</td>{% endif %}
+    <td>{{ roll.material.name }}</td><td>{{ roll.color.name }}</td>
+    <td class="num">{{ roll.urut }}</td><td class="num">{{ roll.yard|indo }}</td>
+    <td>{{ roll.lokasi.name|default:"—" }}</td>
+    <td>{% include 'partials/status.html' with item=roll %}</td>
+    <td>{{ roll.alokasi.cmt.name|default:"—" }}</td>
+    <td>{% if roll.alokasi_id %}<a href="{% url 'po_detail' roll.alokasi.po_id %}">{{ roll.alokasi.po.nomor }}</a>{% else %}—{% endif %}</td>
+    <td>{{ roll.tgl_kirim|date:"d M Y"|default:"—" }}</td>
+  </tr>{% endfor %}</tbody></table></div></section>
+  {% if request.user.role == 'purchasing' and not invoice.dibatalkan %}
+  {% include 'partials/action_bar.html' %}
+  <dialog id="allocate-dialog"><div class="dialog-head"><h2>Ajukan alokasi</h2>
+    <button type="button" data-close-dialog aria-label="Tutup">Tutup</button></div>
+    <div class="field"><label for="allocation-cmt">CMT</label><select id="allocation-cmt" name="cmt" required>
+      <option value="">Pilih CMT</option>{% for cmt in cmts %}
+      <option value="{{ cmt.pk }}">{{ cmt.name }}</option>{% endfor %}</select></div>
+    <div class="field"><label for="allocation-po">No. PO</label><div data-combo>
+      <input id="allocation-po" name="po" required autocomplete="off" role="combobox"
+        aria-autocomplete="list" aria-expanded="false" aria-controls="po-list">
+      <div class="combo-list" id="po-list" role="listbox" hidden>
+        {% for po in pos %}<button type="button" role="option"
+          data-value="{{ po.nomor }}">{{ po.nomor }}{% if po.selesai %} · selesai{% endif %}</button>
+        {% endfor %}</div></div>
+      <small id="new-po-hint" hidden>PO baru akan dibuat</small></div>
+    <p id="dialog-summary"></p>
+    <div class="row-actions"><button class="button" type="button" data-close-dialog>Batal</button>
+      <button class="button primary" type="submit">Ajukan</button></div>
+  </dialog>
+  {% endif %}
+</form>
+{% if request.user.role == 'purchasing' and not invoice.dibatalkan %}
+<form method="post" action="{% url 'invoice_cancel' invoice.pk %}" class="section-gap" data-confirm="Batalkan invoice ini?">
+  {% csrf_token %}<button class="button danger" type="submit">Batalkan invoice</button></form>
+{% endif %}
+{% endblock %}

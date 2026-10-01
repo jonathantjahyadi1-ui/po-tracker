@@ -1,1 +1,5 @@
-{% extends 'base.html' %}{% block content %}<div class="error-page"><p class="eyebrow">PERMINTAAN TERTUNDA</p><h1>{{ title }}</h1><p>{{ error }}</p>{% if request.request_id %}<small>Kode permintaan: {{ request.request_id }}</small>{% endif %}<a class="button primary" href="/">Kembali ke ringkasan</a></div>{% endblock %}
+{% extends 'base.html' %}
+{% block content %}
+<section class="panel error-page"><h1>{{ title }}</h1><p>{{ text }}</p>
+  <a href="/" class="button">Kembali</a></section>
+{% endblock %}

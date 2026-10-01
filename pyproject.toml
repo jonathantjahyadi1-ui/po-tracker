@@ -1,0 +1,9 @@
+[tool.ruff]
+line-length = 100
+exclude = [".venv", "tracking/migrations"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+
+[tool.ruff.format]
+quote-style = "single"

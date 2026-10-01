@@ -1,0 +1,21 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="page-head"><div><a class="back" href="{% url 'cmt_list' %}">CMT</a>
+  <h1>{{ cmt.name }}</h1></div></div>
+<section class="panel"><div class="panel-head"><h2>PO</h2></div>
+  <div class="table-wrap"><table><thead><tr><th>No. PO</th><th>Produk</th>
+    <th>Status</th></tr></thead><tbody>{% for po in pos %}
+    <tr><td><a class="ref" href="{% url 'po_detail' po.pk %}">{{ po.nomor }}</a></td>
+    <td>{{ po.produk|default:"—" }}</td>
+    <td>{% if po.selesai %}Selesai{% elif po.balance %}Balance{% else %}Belum balance{% endif %}</td></tr>
+    {% empty %}<tr><td colspan="3" class="empty">Belum ada PO untuk CMT ini.</td></tr>{% endfor %}
+    </tbody></table></div></section>
+<section class="panel section-gap"><div class="panel-head"><h2>Alokasi</h2></div>
+  <div class="table-wrap"><table><thead><tr><th>PO</th><th class="num">Roll</th>
+    <th>Status</th></tr></thead><tbody>{% for item in allocations %}
+    <tr><td><a class="ref" href="{% url 'allocation_detail' item.pk %}">{{ item.po.nomor }}</a></td>
+    <td class="num">{{ item.roll_count }}</td>
+    <td>{% include 'partials/status.html' with item=item %}</td></tr>
+    {% empty %}<tr><td colspan="3" class="empty">Belum ada alokasi.</td></tr>{% endfor %}
+    </tbody></table></div></section>
+{% endblock %}

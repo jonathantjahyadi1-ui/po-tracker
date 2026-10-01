@@ -1,0 +1,33 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="page-head"><h1>Master</h1></div>
+<nav class="tabs" aria-label="Jenis master">{% for kind,label in kinds %}
+  <a href="?tab={{ kind }}" {% if tab == kind %}aria-current="page"{% endif %}>{{ label }}</a>
+{% endfor %}</nav>
+{% if request.user.role == 'purchasing' %}
+<form method="post" class="inline-form panel" data-submit-form>{% csrf_token %}
+  <input type="hidden" name="kind" value="{{ tab }}">
+  <div class="field"><label for="master-name">Nama</label><input id="master-name" name="name" required></div>
+  <button class="button primary" type="submit">Tambah {{ tab }}</button>
+</form>
+{% endif %}
+<section class="panel"><div class="table-wrap"><table><thead><tr><th>Nama</th><th>Status</th>
+  {% if request.user.role == 'purchasing' %}<th>Ubah</th>{% endif %}</tr></thead><tbody>
+  {% for item in items %}<tr><td>{{ item.name }}</td>
+  <td>{% if item.active %}Aktif{% else %}Nonaktif{% endif %}</td>
+  {% if request.user.role == 'purchasing' %}<td><div class="row-actions">
+    <form method="post" class="row-actions" data-submit-form>{% csrf_token %}
+      <input type="hidden" name="kind" value="{{ tab }}"><input type="hidden" name="id" value="{{ item.pk }}">
+      <label class="sr-only" for="name-{{ item.pk }}">Nama</label>
+      <input id="name-{{ item.pk }}" name="name" value="{{ item.name }}" required>
+      <button class="button small" type="submit">Ubah nama</button>
+    </form>
+    <form method="post" data-submit-form>{% csrf_token %}
+      <input type="hidden" name="kind" value="{{ tab }}"><input type="hidden" name="id" value="{{ item.pk }}">
+      <input type="hidden" name="name" value="{{ item.name }}">
+      <button class="button small" name="action" value="toggle" type="submit">
+      {% if item.active %}Nonaktifkan{% else %}Aktifkan{% endif %}</button>
+    </form></div></td>{% endif %}</tr>
+  {% empty %}<tr><td colspan="3" class="empty">Belum ada data {{ tab }}.</td></tr>{% endfor %}
+  </tbody></table></div></section>
+{% endblock %}

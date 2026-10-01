@@ -1,0 +1,116 @@
+{% extends 'base.html' %}{% load tracker %}
+{% block content %}
+<div class="page-head"><div><a class="back" href="{% url 'vendor_list' %}">Vendor</a>
+  <h1>{{ title }}</h1></div></div>
+<form method="post" enctype="multipart/form-data" id="invoice-form"
+  data-restore="{{ form_error|yesno:'true,false' }}" data-submit-form>
+  {% csrf_token %}
+  {% if existing %}<input type="hidden" name="existing" value="1">{% endif %}
+  <section class="panel form-section"><h2>Invoice</h2>
+    <div class="field-grid">
+      {% for field in form %}
+      <div class="field {% if field.name == 'catatan' %}wide{% endif %}">
+        <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+        {% if field.name == 'vendor' %}
+        <div data-combo><input id="{{ field.id_for_label }}" name="vendor"
+          value="{{ field.value|default:'' }}" autocomplete="off" role="combobox"
+          aria-autocomplete="list" aria-expanded="false" aria-controls="vendor-options"
+          required><div class="combo-list" id="vendor-options" role="listbox" hidden>
+          {% for item in vendors %}<button type="button" role="option"
+            data-value="{{ item.name }}">{{ item.name }}</button>{% endfor %}</div></div>
+        {% else %}{{ field }}{% endif %}{{ field.errors }}
+      </div>{% endfor %}
+    </div>
+  </section>
+  {% if existing %}
+  <section class="panel form-section section-gap"><h2>Roll tercatat</h2>
+    <datalist id="existing-materials">{% for item in materials %}<option value="{{ item.name }}"></option>{% endfor %}</datalist>
+    <datalist id="existing-colors">{% for item in colors %}<option value="{{ item.name }}"></option>{% endfor %}</datalist>
+    <datalist id="existing-warehouses">{% for item in warehouses %}<option value="{{ item.name }}"></option>{% endfor %}</datalist>
+    <div class="table-wrap"><table><thead><tr><th>Bahan</th><th>Warna</th>
+      <th>Lokasi</th><th class="num">Roll</th><th>Yard</th><th>Status</th></tr></thead><tbody>
+      {% for roll in existing %}<tr>
+      <td><label class="sr-only" for="material-{{ roll.pk }}">Bahan roll {{ roll.urut }}</label>
+        <input id="material-{{ roll.pk }}" name="existing-{{ roll.pk }}-material"
+          value="{{ roll.material.name }}" list="existing-materials"
+          {% if roll.status != 'tersedia' %}readonly{% endif %}></td>
+      <td><label class="sr-only" for="color-{{ roll.pk }}">Warna roll {{ roll.urut }}</label>
+        <input id="color-{{ roll.pk }}" name="existing-{{ roll.pk }}-color"
+          value="{{ roll.color.name }}" list="existing-colors"
+          {% if roll.status != 'tersedia' %}readonly{% endif %}></td>
+      <td><label class="sr-only" for="lokasi-{{ roll.pk }}">Lokasi roll {{ roll.urut }}</label>
+        <input id="lokasi-{{ roll.pk }}" name="existing-{{ roll.pk }}-lokasi"
+          value="{{ roll.lokasi.name|default:'' }}" list="existing-warehouses"
+          {% if roll.status != 'tersedia' %}readonly{% endif %}></td>
+      <td class="num">{{ roll.urut }}</td>
+      <td><label class="sr-only" for="existing-{{ roll.pk }}">Yard roll {{ roll.urut }}</label>
+        <input id="existing-{{ roll.pk }}" name="existing-{{ roll.pk }}"
+          value="{{ roll.yard }}" inputmode="decimal" {% if roll.status != 'tersedia' %}readonly{% endif %}></td>
+      <td>{% include 'partials/status.html' with item=roll %}</td></tr>
+      {% endfor %}</tbody></table></div>
+  </section>
+  {% endif %}
+  <div id="groups">
+    <section class="panel yard-group section-gap" data-group>
+      <div class="panel-head"><h2>Bahan <span data-group-number>1</span></h2>
+        <button class="button small" type="button" data-remove-group>Hapus bahan</button></div>
+      <div class="field-grid three">
+        <div class="field"><label>Bahan</label><div data-combo>
+          <input name="material[]" autocomplete="off" role="combobox" aria-autocomplete="list"
+            aria-expanded="false" aria-controls="material-options-0">
+          <div class="combo-list" id="material-options-0" role="listbox" hidden>
+            {% for item in materials %}<button type="button" role="option"
+              data-value="{{ item.name }}">{{ item.name }}</button>{% endfor %}</div>
+        </div></div>
+        <div class="field"><label>Warna</label><div data-combo>
+          <input name="color[]" autocomplete="off" role="combobox" aria-autocomplete="list"
+            aria-expanded="false" aria-controls="color-options-0">
+          <div class="combo-list" id="color-options-0" role="listbox" hidden>
+            {% for item in colors %}<button type="button" role="option"
+              data-value="{{ item.name }}">{{ item.name }}</button>{% endfor %}</div>
+        </div></div>
+        <div class="field"><label>Lokasi / gudang</label><div data-combo>
+          <input name="lokasi[]" autocomplete="off" role="combobox" aria-autocomplete="list"
+            aria-expanded="false" aria-controls="warehouse-options-0">
+          <div class="combo-list" id="warehouse-options-0" role="listbox" hidden>
+            {% for item in warehouses %}<button type="button" role="option"
+              data-value="{{ item.name }}">{{ item.name }}</button>{% endfor %}</div>
+        </div></div>
+      </div>
+      <div class="group-note"><button class="link-button" type="button" data-note-open>Tambah catatan</button>
+        <div hidden><label>Catatan bahan<textarea name="catatan[]" rows="2"></textarea></label></div></div>
+      {% include 'partials/yard.html' with file_name='file-0' %}
+    </section>
+  </div>
+  <button class="button section-gap" type="button" id="add-group">Tambah bahan</button>
+  <div class="save-bar"><strong id="invoice-summary">1 grup · 0 roll · 0,00 yd</strong>
+    <div class="row-actions"><a class="button" href="{% url 'vendor_list' %}">Batal</a>
+      <button class="button primary" type="submit">Simpan invoice</button></div></div>
+</form>
+<template id="group-template">
+  <section class="panel yard-group section-gap" data-group>
+    <div class="panel-head"><h2>Bahan <span data-group-number></span></h2>
+      <button class="button small" type="button" data-remove-group>Hapus bahan</button></div>
+    <div class="field-grid three">
+      <div class="field"><label>Bahan</label><div data-combo><input name="material[]"
+        autocomplete="off" role="combobox" aria-autocomplete="list" aria-expanded="false">
+        <div class="combo-list" role="listbox" hidden>
+        {% for item in materials %}<button type="button" role="option"
+          data-value="{{ item.name }}">{{ item.name }}</button>{% endfor %}</div></div></div>
+      <div class="field"><label>Warna</label><div data-combo><input name="color[]"
+        autocomplete="off" role="combobox" aria-autocomplete="list" aria-expanded="false">
+        <div class="combo-list" role="listbox" hidden>
+        {% for item in colors %}<button type="button" role="option"
+          data-value="{{ item.name }}">{{ item.name }}</button>{% endfor %}</div></div></div>
+      <div class="field"><label>Lokasi / gudang</label><div data-combo><input name="lokasi[]"
+        autocomplete="off" role="combobox" aria-autocomplete="list" aria-expanded="false">
+        <div class="combo-list" role="listbox" hidden>
+        {% for item in warehouses %}<button type="button" role="option"
+          data-value="{{ item.name }}">{{ item.name }}</button>{% endfor %}</div></div></div>
+    </div>
+    <div class="group-note"><button class="link-button" type="button" data-note-open>Tambah catatan</button>
+      <div hidden><label>Catatan bahan<textarea name="catatan[]" rows="2"></textarea></label></div></div>
+    {% include 'partials/yard.html' with file_name='file-x' %}
+  </section>
+</template>
+{% endblock %}

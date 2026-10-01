@@ -1,0 +1,16 @@
+{% extends 'base.html' %}{% load tracker %}
+{% block content %}
+<div class="page-head"><h1>CMT</h1></div>
+<section class="panel"><div class="table-wrap"><table><thead><tr><th>CMT</th>
+  <th class="num">Menunggu</th><th class="num">Siap kirim</th>
+  <th class="num">Di CMT</th><th class="num">PO balance</th>
+  <th class="num">PO belum balance</th></tr></thead><tbody>
+  {% for cmt in cmts %}<tr><td><a class="ref" href="{% url 'cmt_detail' cmt.pk %}">{{ cmt.name }}</a></td>
+    <td class="num">{{ cmt.counts.menunggu|default:0 }}</td>
+    <td class="num">{{ cmt.counts.siap_kirim|default:0 }}</td>
+    <td class="num">{{ cmt.at_cmt }}</td>
+    <td class="num">{{ cmt.balance_count }}</td>
+    <td class="num">{{ cmt.unbalanced_count }}</td></tr>
+  {% empty %}<tr><td colspan="6" class="empty">Belum ada CMT.</td></tr>{% endfor %}
+  </tbody></table></div></section>
+{% endblock %}

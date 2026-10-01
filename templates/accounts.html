@@ -1,0 +1,36 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="page-head"><h1>Akun</h1></div>
+<section class="panel form-section"><h2>Tambah akun</h2>
+  <form method="post" data-submit-form>{% csrf_token %}
+    <input type="hidden" name="action" value="create">
+    <div class="field-grid three">{% for field in form %}
+      <div class="field"><label for="{{ field.id_for_label }}">{{ field.label }}</label>{{ field }}</div>
+    {% endfor %}</div><div class="form-actions"><button class="button primary" type="submit">Tambah akun</button></div>
+  </form>
+</section>
+<section class="panel section-gap"><div class="table-wrap"><table><thead><tr>
+  <th>Pengguna</th><th>Peran</th><th>Status</th><th>Aksi</th></tr></thead><tbody>
+  {% for user in users %}<tr><td>{{ user.username }}</td><td>{{ user.get_role_display }}</td>
+    <td>{% if user.is_active %}Aktif{% else %}Nonaktif{% endif %}</td><td>
+    {% if user.pk != request.user.pk %}<div class="account-actions">
+      <form method="post" data-submit-form>{% csrf_token %}
+        <input type="hidden" name="id" value="{{ user.pk }}">
+        <label class="sr-only" for="role-{{ user.pk }}">Peran {{ user.username }}</label>
+        <select id="role-{{ user.pk }}" name="role">{% for value,label in roles %}
+          <option value="{{ value }}" {% if user.role == value %}selected{% endif %}>{{ label }}</option>
+        {% endfor %}</select><button class="button small" name="action" value="role">Ubah peran</button>
+      </form>
+      <form method="post" data-submit-form>{% csrf_token %}
+        <input type="hidden" name="id" value="{{ user.pk }}">
+        <button class="button small" name="action" value="toggle">
+          {% if user.is_active %}Nonaktifkan{% else %}Aktifkan{% endif %}</button></form>
+      <form method="post" data-submit-form>{% csrf_token %}
+        <input type="hidden" name="id" value="{{ user.pk }}">
+        <label class="sr-only" for="password-{{ user.pk }}">Kata sandi {{ user.username }}</label>
+        <input id="password-{{ user.pk }}" name="password" type="password" minlength="6" required>
+        <button class="button small" name="action" value="password">Reset sandi</button>
+      </form></div>{% endif %}
+    </td></tr>{% endfor %}
+  </tbody></table></div></section>
+{% endblock %}
