@@ -5,7 +5,6 @@ services:
     plan: 0.5c-512mb
     region: singapore
     buildCommand: bash build.sh
-    preDeployCommand: python manage.py migrate --noinput
     startCommand: gunicorn config.wsgi:application --bind 0.0.0.0:$PORT --workers 2 --threads 2 --timeout 60 --access-logfile - --error-logfile -
     healthCheckPath: /healthz/
     autoDeployTrigger: "off"
@@ -18,5 +17,7 @@ services:
         generateValue: true
       - key: DATABASE_URL
         sync: false
+      - key: DATABASE_SCHEMA
+        value: severli
       - key: DATABASE_SSL
         value: require

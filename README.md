@@ -33,16 +33,20 @@ jalankan `manage.py seed_contoh` saat `DEBUG=true`.
 - `DEBUG`: `true` untuk lokal; `false` untuk produksi.
 - `SECRET_KEY`: wajib di produksi.
 - `DATABASE_URL`: URL PostgreSQL produksi. Tanpa URL, mode lokal memakai SQLite.
+- `DATABASE_SCHEMA`: schema privat PostgreSQL untuk versi ini, misalnya `severli`.
+- `LEGACY_USERS_SCHEMA`: opsional, schema akun lama yang perlu disalin saat deploy.
 - `DATABASE_SSL`: `require` secara default; `disable` untuk PostgreSQL lokal.
 - `ALLOWED_HOSTS`, `CSRF_TRUSTED_ORIGINS`: host dan origin aplikasi.
 - `TEST_DATABASE_URL`: opsional untuk menjalankan tes di PostgreSQL terpisah.
 
 ## Deploy
 
-`render.yaml` memakai Render dan PostgreSQL eksternal. Buat database kosong, atur
-`DATABASE_URL`, lalu deploy. Perintah pra-deploy menjalankan migrasi; buat admin
-dengan `python manage.py createsuperuser`. Jangan arahkan migrasi awal ini ke database
-versi lama sebelum data dimigrasikan atau dicadangkan.
+`build.sh` membuat schema baru, menjalankan migrasi, lalu menyalin akun lama jika
+`LEGACY_USERS_SCHEMA` diisi. Untuk layanan Render yang sudah ada, atur
+`DATABASE_SCHEMA=severli` dan `LEGACY_USERS_SCHEMA=po_tracking` sebelum deploy;
+schema `po_tracking` tetap tersimpan. Untuk database baru, kosongkan variabel legacy
+dan buat admin dengan `python manage.py createsuperuser`.
+Data operasional lama tidak dipindahkan dan tetap tersedia di schema `po_tracking`.
 
 ## Pemeriksaan
 

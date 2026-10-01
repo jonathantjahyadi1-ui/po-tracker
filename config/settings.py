@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 from pathlib import Path
 from urllib.parse import unquote, urlparse
@@ -64,6 +65,11 @@ TEMPLATES = [
     }
 ]
 WSGI_APPLICATION = 'config.wsgi.application'
+DATABASE_SCHEMA = os.getenv('DATABASE_SCHEMA', '').strip()
+LEGACY_USERS_SCHEMA = os.getenv('LEGACY_USERS_SCHEMA', '').strip()
+for schema in (DATABASE_SCHEMA, LEGACY_USERS_SCHEMA):
+    if schema and not re.fullmatch(r'[a-z_][a-z0-9_]*', schema):
+        raise ImproperlyConfigured('Nama schema database tidak valid.')
 if TESTING:
     DATABASE_URL = os.getenv('TEST_DATABASE_URL')
 elif DEBUG:
@@ -86,6 +92,10 @@ if DATABASE_URL:
             'OPTIONS': {'sslmode': os.getenv('DATABASE_SSL', 'require')},
         }
     }
+    if DATABASE_SCHEMA:
+        DATABASES['default']['OPTIONS']['options'] = f'-c search_path={DATABASE_SCHEMA}'
+    elif not DEBUG and not TESTING:
+        raise ImproperlyConfigured('DATABASE_SCHEMA wajib diisi untuk produksi.')
 elif DEBUG or TESTING:
     DATABASES = {
         'default': {

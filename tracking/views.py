@@ -1,6 +1,7 @@
 from collections import defaultdict
 from datetime import date
 from functools import wraps
+from hashlib import sha256
 from io import BytesIO
 
 from django.contrib import messages
@@ -80,7 +81,9 @@ def health(request):
 def sign_in(request):
     if request.user.is_authenticated:
         return redirect('dashboard')
-    key = f'login:{request.META.get("REMOTE_ADDR", "")}:{request.POST.get("username", "")}'
+    username = request.POST.get('username', '').casefold()
+    identity = f'{request.META.get("REMOTE_ADDR", "")}:{username}'
+    key = f'login:{sha256(identity.encode()).hexdigest()}'
     if request.method == 'POST' and cache.get(key, 0) >= 5:
         messages.error(request, 'Terlalu banyak percobaan. Coba lagi dalam 15 menit.')
         return render(request, 'login.html', {'form': LoginForm(), 'title': 'Masuk'}, status=429)
