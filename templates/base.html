@@ -16,7 +16,10 @@
 {% if request.user.is_authenticated %}
 <a class="skip" href="#main">Lewati navigasi</a>
 <aside class="sidebar" id="sidebar">
-  <a class="brand" href="/">severli<span>PO TRACKER</span></a>
+  <div class="sidebar-head">
+    <a class="brand" href="/">severli<span>PO TRACKER</span></a>
+    <button class="sidebar-close" id="sidebar-close" type="button" aria-label="Tutup menu">&times;</button>
+  </div>
   <nav aria-label="Navigasi utama">
     {% if request.user.role != 'admin' %}
     <a href="{% url 'dashboard' %}" {% if active == 'dashboard' %}aria-current="page"{% endif %}>Ringkasan</a>
@@ -41,6 +44,7 @@
     </form>
   </div>
 </aside>
+<button class="nav-backdrop" id="nav-backdrop" type="button" aria-label="Tutup menu" tabindex="-1"></button>
 <div class="workspace">
   <header class="topbar">
     <button class="menu-toggle" id="menu-toggle" type="button"

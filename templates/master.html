@@ -11,11 +11,11 @@
   <button class="button primary" type="submit">Tambah {{ tab }}</button>
 </form>
 {% endif %}
-<section class="panel"><div class="table-wrap"><table><thead><tr><th>Nama</th><th>Status</th>
+<section class="panel {% if request.user.role == 'purchasing' %}section-gap{% endif %}"><div class="table-wrap"><table><thead><tr><th>Nama</th><th>Status</th>
   {% if request.user.role == 'purchasing' %}<th>Ubah</th>{% endif %}</tr></thead><tbody>
   {% for item in items %}<tr><td>{{ item.name }}</td>
   <td>{% if item.active %}Aktif{% else %}Nonaktif{% endif %}</td>
-  {% if request.user.role == 'purchasing' %}<td><div class="row-actions">
+  {% if request.user.role == 'purchasing' %}<td><div class="row-actions master-actions">
     <form method="post" class="row-actions" data-submit-form>{% csrf_token %}
       <input type="hidden" name="kind" value="{{ tab }}"><input type="hidden" name="id" value="{{ item.pk }}">
       <label class="sr-only" for="name-{{ item.pk }}">Nama</label>

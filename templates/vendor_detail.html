@@ -9,7 +9,7 @@
     <p>Surat jalan {{ invoice.surat_jalan|default:"—" }} · {{ invoice.tanggal|date:"d M Y" }}
       · Rp {{ invoice.total_rp|indo }} · {{ invoice.yards|indo }} yd</p></div>
     <a href="{% url 'invoice_detail' invoice.pk %}">Lihat roll</a></div>
-  <div class="table-wrap"><table><thead><tr><th>Bahan / warna</th>
+  <div class="table-wrap wide-table-wrap"><table><thead><tr><th>Bahan / warna</th>
     <th class="num">Roll</th><th class="num">Yard</th>
     {% for date in invoice.dates %}<th>{{ date|date:"d M Y" }}</th>{% endfor %}
     <th>Dialokasikan, belum kirim</th><th class="num">Sisa tersedia</th>

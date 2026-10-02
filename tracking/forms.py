@@ -17,7 +17,9 @@ class InvoiceForm(forms.Form):
     total_rp = forms.DecimalField(
         label='Total Rp', max_digits=16, decimal_places=2, min_value=0, initial=0
     )
-    catatan = forms.CharField(label='Catatan', required=False, widget=forms.Textarea)
+    catatan = forms.CharField(
+        label='Catatan', required=False, widget=forms.Textarea(attrs={'rows': 3})
+    )
 
 
 class PoForm(forms.ModelForm):
@@ -26,7 +28,7 @@ class PoForm(forms.ModelForm):
         fields = ['tgl_order', 'produk', 'pemakaian_std', 'catatan']
         widgets = {
             'tgl_order': forms.DateInput(attrs={'type': 'date'}),
-            'catatan': forms.Textarea,
+            'catatan': forms.Textarea(attrs={'rows': 3}),
         }
 
 

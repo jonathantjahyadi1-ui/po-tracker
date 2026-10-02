@@ -2,14 +2,39 @@ document.documentElement.classList.add('js');
 
 document.addEventListener('DOMContentLoaded', () => {
   const menu = document.getElementById('menu-toggle');
+  const sidebar = document.getElementById('sidebar');
+  const sidebarClose = document.getElementById('sidebar-close');
+  const mobileNav = window.matchMedia('(max-width: 900px)');
+  const syncMenu = () => {
+    if (sidebar) sidebar.inert = mobileNav.matches &&
+      !document.body.classList.contains('nav-open');
+  };
+  const closeMenu = () => {
+    document.body.classList.remove('nav-open');
+    menu?.setAttribute('aria-expanded', 'false');
+    menu?.setAttribute('aria-label', 'Buka menu');
+    syncMenu();
+  };
   menu?.addEventListener('click', () => {
     const open = document.body.classList.toggle('nav-open');
     menu.setAttribute('aria-expanded', String(open));
+    menu.setAttribute('aria-label', open ? 'Tutup menu' : 'Buka menu');
+    syncMenu();
+    if (open) sidebarClose?.focus();
   });
+  sidebarClose?.addEventListener('click', () => {
+    closeMenu();
+    menu?.focus();
+  });
+  document.getElementById('nav-backdrop')?.addEventListener('click', closeMenu);
+  document.querySelectorAll('.sidebar nav a').forEach(link =>
+    link.addEventListener('click', closeMenu));
+  mobileNav.addEventListener('change', closeMenu);
+  syncMenu();
   document.addEventListener('keydown', event => {
     if (event.key === 'Escape') {
-      document.body.classList.remove('nav-open');
-      menu?.setAttribute('aria-expanded', 'false');
+      if (document.body.classList.contains('nav-open')) menu?.focus();
+      closeMenu();
     }
   });
   document.querySelectorAll('[data-close-message]').forEach(button => {

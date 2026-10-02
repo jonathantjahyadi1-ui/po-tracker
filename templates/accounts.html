@@ -9,7 +9,7 @@
     {% endfor %}</div><div class="form-actions"><button class="button primary" type="submit">Tambah akun</button></div>
   </form>
 </section>
-<section class="panel section-gap"><div class="table-wrap"><table><thead><tr>
+<section class="panel section-gap"><div class="table-wrap wide-table-wrap"><table><thead><tr>
   <th>Pengguna</th><th>Peran</th><th>Status</th><th>Aksi</th></tr></thead><tbody>
   {% for user in users %}<tr><td>{{ user.username }}</td><td>{{ user.get_role_display }}</td>
     <td>{% if user.is_active %}Aktif{% else %}Nonaktif{% endif %}</td><td>

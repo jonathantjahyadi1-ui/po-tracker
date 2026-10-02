@@ -3,11 +3,11 @@
 <div class="page-head"><div><a class="back" href="{% url 'po_list' %}">PO</a>
   <h1>{{ po.nomor }}</h1><p>{% if po.selesai %}Selesai{% elif balance %}Balance{% else %}Belum balance{% endif %}</p></div>
   <a class="button" href="{% url 'po_export' po.pk %}">Unduh Excel</a></div>
-<section class="panel form-section"><div class="panel-head"><h2>Informasi PO</h2></div>
+<section class="panel"><div class="panel-head"><h2>Informasi PO</h2></div>
   <div class="meta-line"><span>Tanggal masuk CMT: {{ tgl_masuk|date:"d M Y"|default:"—" }}</span>
     <span>Bahan: {{ materials|default:"—" }}</span></div>
   {% if request.user.role == 'purchasing' and not po.selesai %}
-  <form method="post" data-submit-form>{% csrf_token %}<input type="hidden" name="action" value="edit">
+  <form method="post" class="form-section" data-submit-form>{% csrf_token %}<input type="hidden" name="action" value="edit">
     <div class="field-grid">{% for field in form %}
       <div class="field {% if field.name == 'catatan' %}wide{% endif %}">
         <label for="{{ field.id_for_label }}">{{ field.label }}</label>{{ field }}{{ field.errors }}
@@ -18,7 +18,7 @@
     {{ po.tgl_order|date:"d M Y"|default:"—" }}</span><span>Produk: {{ po.produk|default:"—" }}</span>
     <span>Pemakaian std: {{ po.pemakaian_std|default:"—" }}</span></div>{% endif %}
 </section>
-<section class="panel section-gap"><div class="table-wrap"><table><thead><tr>
+<section class="panel section-gap"><div class="table-wrap wide-table-wrap"><table class="po-summary-table"><thead><tr>
   <th>Invoice</th><th>Surat jalan</th><th>Warna</th>
   <th class="num">Roll</th><th class="num">Yard</th><th class="num">Hasil</th>
   {% for date in dates %}<th class="num">{{ date|date:"d M Y" }}</th>{% endfor %}
@@ -72,7 +72,7 @@
 {% endif %}
 <section class="panel section-gap"><div class="panel-head"><h2>Roll PO</h2></div>
   <form method="post" action="{% url 'roll_status' %}" data-submit-form>{% csrf_token %}
-    <div class="table-wrap"><table><thead><tr>
+    <div class="table-wrap wide-table-wrap"><table><thead><tr>
       {% if request.user.role == 'purchasing' and not po.selesai %}
       <th><input type="checkbox" id="select-all" aria-label="Pilih semua roll"></th>{% endif %}
       <th>Invoice</th><th>Warna</th><th class="num">Roll</th><th class="num">Yard</th>

@@ -4,20 +4,20 @@
   <h1>{{ allocation.po.nomor }}</h1><p>{{ allocation.cmt.name }} ·
   {% include 'partials/status.html' with item=allocation %}</p></div></div>
 {% if request.user.role == 'purchasing' and allocation.status == 'menunggu' %}
-<div class="row-actions section-gap">
+<section class="panel form-section section-gap"><h2>Tinjau alokasi</h2><div class="decision-actions">
   <form method="post" data-submit-form>{% csrf_token %}
     <button class="button primary" name="action" value="acc">ACC alokasi</button></form>
   <form method="post" data-submit-form>{% csrf_token %}
     <label for="reject-reason">Alasan</label><input id="reject-reason" name="alasan" required>
     <button class="button danger" name="action" value="tolak">Tolak</button></form>
-</div>{% endif %}
+</div></section>{% endif %}
 {% if request.user.role == 'purchasing' and allocation.status == 'disetujui' %}
 <form method="post" class="inline-form section-gap" data-submit-form>{% csrf_token %}
   <label for="cancel-reason">Alasan pembatalan</label><input id="cancel-reason" name="alasan" required>
   <button class="button danger" name="action" value="batalkan">Batalkan alokasi</button>
 </form>{% endif %}
 <form method="post" data-submit-form>{% csrf_token %}
-  <section class="panel section-gap"><div class="table-wrap"><table><thead><tr>
+  <section class="panel section-gap"><div class="table-wrap wide-table-wrap"><table><thead><tr>
     {% if request.user.role == 'purchasing' %}<th><input type="checkbox" id="select-all" aria-label="Pilih semua roll"></th>{% endif %}
     <th>Invoice</th><th>Bahan</th><th>Warna</th><th class="num">Roll</th>
     <th class="num">Yard</th><th>Status</th><th>Tgl kirim</th><th>Tgl terima</th>

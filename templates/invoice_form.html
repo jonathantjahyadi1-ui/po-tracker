@@ -23,11 +23,11 @@
     </div>
   </section>
   {% if existing %}
-  <section class="panel form-section section-gap"><h2>Roll tercatat</h2>
+  <section class="panel section-gap"><div class="panel-head"><h2>Roll tercatat</h2></div>
     <datalist id="existing-materials">{% for item in materials %}<option value="{{ item.name }}"></option>{% endfor %}</datalist>
     <datalist id="existing-colors">{% for item in colors %}<option value="{{ item.name }}"></option>{% endfor %}</datalist>
     <datalist id="existing-warehouses">{% for item in warehouses %}<option value="{{ item.name }}"></option>{% endfor %}</datalist>
-    <div class="table-wrap"><table><thead><tr><th>Bahan</th><th>Warna</th>
+    <div class="table-wrap wide-table-wrap"><table class="roll-edit-table"><thead><tr><th>Bahan</th><th>Warna</th>
       <th>Lokasi</th><th class="num">Roll</th><th>Yard</th><th>Status</th></tr></thead><tbody>
       {% for roll in existing %}<tr>
       <td><label class="sr-only" for="material-{{ roll.pk }}">Bahan roll {{ roll.urut }}</label>

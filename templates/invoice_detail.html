@@ -11,7 +11,7 @@
 {% if invoice.dibatalkan %}<p class="message error">Invoice dibatalkan.</p>{% endif %}
 <form method="post" action="{% url 'allocation_create' %}" id="allocation-form" data-submit-form>
   {% csrf_token %}
-  <section class="panel"><div class="table-wrap"><table><thead><tr>
+  <section class="panel"><div class="table-wrap wide-table-wrap"><table><thead><tr>
     {% if request.user.role == 'purchasing' and not invoice.dibatalkan %}
     <th><input type="checkbox" id="select-all" aria-label="Pilih semua yang tersedia"></th>
     {% endif %}
