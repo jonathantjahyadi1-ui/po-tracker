@@ -84,17 +84,29 @@ document.addEventListener('DOMContentLoaded', () => {
 
   const selection = document.querySelectorAll('input[name=roll][type=checkbox]');
   const selectAll = document.getElementById('select-all');
+  const poInput = document.getElementById('allocation-po');
   let lastSelected = null;
   const updateSelection = () => {
     const checked = [...selection].filter(box => box.checked);
     const sum = checked.reduce((total, box) => total + Number(box.dataset.yard || 0), 0);
-    const label = `${checked.length} roll · ${format(sum)} yd`;
+    const groups = new Set(checked.map(box => box.dataset.invoicePo));
+    const mixed = groups.size > 1;
+    const label = mixed ? 'Pilih roll dari satu grup PO' :
+      `${checked.length} roll · ${format(sum)} yd`;
     const bar = document.getElementById('selection-bar');
     if (bar) bar.hidden = !checked.length;
+    const allocate = bar?.querySelector('[data-open-dialog]');
+    if (allocate) allocate.disabled = mixed;
     const summary = document.getElementById('selection-summary');
     if (summary) summary.textContent = label;
     const dialogSummary = document.getElementById('dialog-summary');
     if (dialogSummary) dialogSummary.textContent = label;
+    const assigned = [...new Set(checked.map(box => box.dataset.po).filter(Boolean))];
+    if (!mixed && assigned.length === 1 && poInput) {
+      poInput.value = assigned[0];
+      const hint = document.getElementById('new-po-hint');
+      if (hint) hint.hidden = true;
+    }
   };
   selection.forEach((box, index) => box.addEventListener('click', event => {
     if (event.shiftKey && lastSelected !== null) {
@@ -117,7 +129,6 @@ document.addEventListener('DOMContentLoaded', () => {
       updateSelection();
     });
   });
-  const poInput = document.getElementById('allocation-po');
   poInput?.addEventListener('input', () => {
     const known = [...document.querySelectorAll('#po-list [data-value]')]
       .some(option => option.dataset.value.toUpperCase() === poInput.value.toUpperCase());
@@ -231,13 +242,17 @@ document.addEventListener('DOMContentLoaded', () => {
   const setupGroup = group => {
     const grid = group.querySelector('[data-yard-grid]');
     const source = group.querySelector('[data-yard-source]');
+    const detailsSource = group.querySelector('[data-roll-details]');
     group.querySelector('[data-note-open]').addEventListener('click', () => {
       const note = group.querySelector('.group-note>div');
       note.hidden = !note.hidden;
       if (!note.hidden) note.querySelector('textarea').focus();
     });
     const values = splitYards(source.value);
-    const addRow = (value = '') => {
+    let savedDetails = [];
+    try { savedDetails = JSON.parse(detailsSource.value || '[]'); } catch { savedDetails = []; }
+    if (!Array.isArray(savedDetails)) savedDetails = [];
+    const addRow = (value = '', detail = {}) => {
       const row = document.createElement('div');
       row.className = 'yard-row';
       const count = document.createElement('span');
@@ -245,18 +260,41 @@ document.addEventListener('DOMContentLoaded', () => {
       const input = document.createElement('input');
       input.type = 'text';
       input.inputMode = 'decimal';
+      input.dataset.yardInput = 'true';
       input.value = value;
       input.setAttribute('aria-label', `Yard roll ${count.textContent}`);
       const check = document.createElement('span');
       check.className = 'check';
-      row.append(count, input, check);
+      const fields = document.createElement('div');
+      fields.className = 'roll-detail-fields';
+      [['material', 'Bahan'], ['color', 'Warna'], ['lokasi', 'Lokasi']].forEach(
+        ([key, label]) => {
+          const wrapper = document.createElement('label');
+          wrapper.textContent = `${label} roll ${count.textContent}`;
+          const override = document.createElement('input');
+          override.type = 'text';
+          override.maxLength = 160;
+          override.dataset.rollDetail = key;
+          override.placeholder = 'Ikuti detail PO';
+          override.value = detail[key] || '';
+          wrapper.append(override);
+          fields.append(wrapper);
+        }
+      );
+      row.append(count, input, check, fields);
       grid.append(row);
       return input;
     };
-    const inputs = () => [...grid.querySelectorAll('input')];
+    const inputs = () => [...grid.querySelectorAll('[data-yard-input]')];
     const update = () => {
-      const raw = inputs().map(input => input.value.trim()).filter(Boolean);
+      const active = inputs().filter(input => input.value.trim());
+      const raw = active.map(input => input.value.trim());
       source.value = raw.join('\n');
+      detailsSource.value = JSON.stringify(active.map(input => Object.fromEntries(
+        [...input.parentElement.querySelectorAll('[data-roll-detail]')].map(field =>
+          [field.dataset.rollDetail, field.value.trim()]
+        )
+      )));
       const valid = raw.map(number).filter(value => value !== null);
       const invalid = raw.length - valid.length;
       const total = valid.reduce((sum, value) => sum + value, 0);
@@ -264,14 +302,20 @@ document.addEventListener('DOMContentLoaded', () => {
       const middle = Math.floor(ordered.length / 2);
       const median = ordered.length % 2 ? ordered[middle] :
         ((ordered[middle - 1] || 0) + (ordered[middle] || 0)) / 2;
+      let missingYard = 0;
       inputs().forEach(input => {
         const value = input.value.trim() ? number(input.value) : null;
+        const hasDetail = [...input.parentElement.querySelectorAll('[data-roll-detail]')]
+          .some(field => field.value.trim());
+        input.required = hasDetail;
+        if (hasDetail && !input.value.trim()) missingYard += 1;
         input.classList.toggle('invalid', Boolean(input.value.trim() && value === null));
         input.parentElement.querySelector('.check').textContent = value && median &&
           (value > 3 * median || value < .2 * median) ? 'cek' : '';
       });
       group.querySelector('[data-yard-error]').textContent = invalid ?
-        `${invalid} yard perlu diperbaiki.` : '';
+        `${invalid} yard perlu diperbaiki.` : missingYard ?
+          `${missingYard} roll memiliki detail tanpa yard.` : '';
       group.querySelector('[data-roll-count]').textContent = String(valid.length);
       group.querySelector('[data-yard-total]').textContent = format(total);
       group.querySelector('[data-yard-average]').textContent = valid.length ?
@@ -284,7 +328,14 @@ document.addEventListener('DOMContentLoaded', () => {
     };
     grid.addEventListener('input', update);
     grid.addEventListener('keydown', event => {
-      if (event.target.tagName !== 'INPUT') return;
+      if (!event.target.matches('[data-yard-input]')) {
+        if (event.key === 'Enter' && event.target.matches('[data-roll-detail]')) {
+          event.preventDefault();
+          const fields = [...grid.querySelectorAll('[data-roll-detail]')];
+          (fields[fields.indexOf(event.target) + 1] || inputs().at(-1))?.focus();
+        }
+        return;
+      }
       const all = inputs();
       const at = all.indexOf(event.target);
       if (event.key === 'Enter') {
@@ -296,7 +347,9 @@ document.addEventListener('DOMContentLoaded', () => {
       } else if (event.key === 'ArrowUp' && at > 0) {
         event.preventDefault();
         all[at - 1].focus();
-      } else if (event.key === 'Backspace' && !event.target.value && all.length > 1) {
+      } else if (event.key === 'Backspace' && !event.target.value && all.length > 1 &&
+        ![...event.target.parentElement.querySelectorAll('[data-roll-detail]')]
+          .some(field => field.value.trim())) {
         event.preventDefault();
         event.target.parentElement.remove();
         all[Math.max(0, at - 1)].focus();
@@ -307,6 +360,7 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     });
     grid.addEventListener('paste', event => {
+      if (!event.target.matches('[data-yard-input]')) return;
       const text = event.clipboardData.getData('text');
       const parts = splitYards(text);
       if (parts.length < 2) return;
@@ -343,15 +397,28 @@ document.addEventListener('DOMContentLoaded', () => {
       addRow().focus();
       update();
     });
+    group.querySelector('[data-roll-detail-toggle]').addEventListener('click', event => {
+      const open = group.classList.toggle('show-roll-details');
+      event.currentTarget.setAttribute('aria-expanded', String(open));
+      event.currentTarget.textContent = open ? 'Sembunyikan detail roll' :
+        'Bedakan detail tiap roll';
+      if (open) grid.querySelector('[data-roll-detail]')?.focus();
+    });
     group.querySelector('[data-remove-group]').addEventListener('click', () => {
       if (document.querySelectorAll('[data-group]').length === 1) return;
-      if (source.value && !window.confirm('Hapus bahan dan daftar yard ini?')) return;
+      if (source.value && !window.confirm('Hapus PO dan daftar yard ini?')) return;
       group.remove();
       renumberGroups();
       updateInvoiceSummary();
     });
-    values.forEach(value => addRow(value));
+    values.forEach((value, index) => addRow(value, savedDetails[index] || {}));
     addRow();
+    if (savedDetails.some(detail => detail && Object.values(detail).some(Boolean))) {
+      group.classList.add('show-roll-details');
+      const toggle = group.querySelector('[data-roll-detail-toggle]');
+      toggle.setAttribute('aria-expanded', 'true');
+      toggle.textContent = 'Sembunyikan detail roll';
+    }
     update();
   };
   const updateInvoiceSummary = () => {
@@ -361,15 +428,19 @@ document.addEventListener('DOMContentLoaded', () => {
     const values = groups.flatMap(group => splitYards(
       group.querySelector('[data-yard-source]').value
     ).map(number).filter(value => value !== null));
-    label.textContent = `${groups.length} grup · ${values.length} roll · ${format(
+    label.textContent = `${groups.length} PO · ${values.length} roll · ${format(
       values.reduce((sum, value) => sum + value, 0)
     )} yd`;
   };
   const renumberGroups = () => {
+    const editing = document.getElementById('groups')?.dataset.edit === 'true';
     document.querySelectorAll('[data-group]').forEach((group, index) => {
-      group.querySelector('[data-group-number]').textContent = String(index + 1);
+      group.querySelector('[data-group-number]').textContent = editing ?
+        `tambahan ${index + 1}` : String(index + 1);
       group.querySelector('[data-file]').name = `file-${index}`;
     });
+    const addButton = document.getElementById('add-group');
+    if (addButton) addButton.disabled = document.querySelectorAll('[data-group]').length >= 10;
   };
   const invoiceForm = document.getElementById('invoice-form');
   if (invoiceForm?.dataset.restore === 'true') {
@@ -388,10 +459,12 @@ document.addEventListener('DOMContentLoaded', () => {
           ));
         }
         ['material[]', 'color[]', 'lokasi[]'].forEach((name, at) => {
-          group.querySelector(`[name="${name}"]`).value = data.fields[at];
+          group.querySelector(`[name="${name}"]`).value = data.fields?.[at] || '';
         });
+        group.querySelector('[name="po[]"]').value = data.po || '';
         group.querySelector('[name="catatan[]"]').value = data.note;
         group.querySelector('[data-yard-source]').value = data.yards;
+        group.querySelector('[data-roll-details]').value = data.details || '';
       });
     } catch { sessionStorage.removeItem(`invoice-draft:${window.location.pathname}`); }
   }
@@ -399,16 +472,19 @@ document.addEventListener('DOMContentLoaded', () => {
   document.querySelectorAll('[data-group]').forEach(setupGroup);
   invoiceForm?.addEventListener('submit', () => {
     const saved = [...document.querySelectorAll('[data-group]')].map(group => ({
+      po: group.querySelector('[name="po[]"]').value,
       fields: ['material[]', 'color[]', 'lokasi[]'].map(name =>
         group.querySelector(`[name="${name}"]`).value
       ),
       note: group.querySelector('[name="catatan[]"]').value,
       yards: group.querySelector('[data-yard-source]').value,
+      details: group.querySelector('[data-roll-details]').value,
     }));
     sessionStorage.setItem(`invoice-draft:${window.location.pathname}`,
       JSON.stringify(saved));
   });
   document.getElementById('add-group')?.addEventListener('click', () => {
+    if (document.querySelectorAll('[data-group]').length >= 10) return;
     const group = document.getElementById('group-template').content.firstElementChild
       .cloneNode(true);
     document.getElementById('groups').append(group);
@@ -417,6 +493,6 @@ document.addEventListener('DOMContentLoaded', () => {
       combo, comboIndex++
     ));
     setupGroup(group);
-    group.querySelector('input[name="material[]"]').focus();
+    group.querySelector('input[name="po[]"]').focus();
   });
 });

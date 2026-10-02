@@ -6,7 +6,10 @@ from django.db import transaction
 from django.db.models import Count, Max, Sum
 from django.utils import timezone
 
-from .models import Alokasi, Hasil, Invoice, KirimGudang, Log, Master, Po, Roll, normalize_po
+from .models import (
+    Alokasi, Hasil, Invoice, InvoiceAttachment, InvoicePo, KirimGudang, Log, Master, Po, Roll,
+    normalize_po,
+)
 
 ZERO = Decimal('0.00')
 TRANSITIONS = {
@@ -178,7 +181,7 @@ def ajukan_alokasi(roll_ids, nomor_po, cmt, user):
         raise ValidationError('Pilih setidaknya satu roll.')
     locked = list(
         Roll.objects.select_for_update()
-        .select_related('alokasi__po')
+        .select_related('alokasi__po', 'invoice_po__po')
         .filter(pk__in=ids)
         .order_by('pk')
     )
@@ -188,9 +191,21 @@ def ajukan_alokasi(roll_ids, nomor_po, cmt, user):
         if roll.status != 'tersedia' or roll.alokasi_id:
             po = roll.alokasi.po.nomor if roll.alokasi_id else 'PO lain'
             raise ValidationError(f'Roll #{roll.urut} baru saja dialokasikan ke {po}.')
+    groups = {roll.invoice_po_id: roll.invoice_po for roll in locked if roll.invoice_po_id}
+    if len(groups) > 1 or (groups and any(not roll.invoice_po_id for roll in locked)):
+        raise ValidationError('Pilih roll dari satu grup PO untuk setiap pengajuan.')
     po, _ = Po.objects.get_or_create(nomor=nomor)
     if po.selesai:
         raise ValidationError('PO sudah selesai.')
+    if groups:
+        group = next(iter(groups.values()))
+        if group.po_id and group.po_id != po.pk:
+            raise ValidationError(f'Roll pada PO {group.urut} sudah terkait ke {group.po.nomor}.')
+        if InvoicePo.objects.filter(invoice=group.invoice, po=po).exclude(pk=group.pk).exists():
+            raise ValidationError(f'{po.nomor} sudah dipakai grup PO lain di invoice ini.')
+        if not group.po_id:
+            group.po = po
+            group.save(update_fields=['po'])
     alokasi = Alokasi.objects.create(po=po, cmt=cmt, dibuat_oleh=user)
     pindah_status(ids, 'menunggu', user, alokasi=alokasi)
     log(user, 'ajukan', f'Alokasi #{alokasi.pk}', f'{po.nomor} · {cmt.name}')
@@ -253,30 +268,80 @@ def simpan_invoice(data, groups, user, invoice=None):
     else:
         invoice = Invoice(dibuat_oleh=user)
     for key, value in data.items():
-        if key != 'vendor':
+        if key not in ('vendor', 'invoice_file'):
             setattr(invoice, key, value)
     invoice.vendor = vendor
     invoice.save()
-    pending = []
-    for group in groups:
-        material = master('material', group['material'])
-        color = master('color', group['color'])
-        lokasi = master('warehouse', group['lokasi']) if group.get('lokasi') else None
-        start = (
-            invoice.roll_set.filter(material=material, color=color).aggregate(value=Max('urut'))[
-                'value'
-            ]
-            or 0
+    upload = data.get('invoice_file')
+    if upload:
+        filename = upload.name.replace('\\', '/').rsplit('/', 1)[-1][:180]
+        InvoiceAttachment.objects.update_or_create(
+            invoice=invoice,
+            defaults={
+                'filename': filename,
+                'content_type': upload.verified_content_type,
+                'size': upload.size,
+                'content': upload.read(),
+            },
         )
-        for index, yard in enumerate(group['yards'], start + 1):
+    pending = []
+    next_urut = {}
+    resolved = {}
+
+    def resolve(kind, name):
+        key = (kind, name.strip().casefold())
+        if key not in resolved:
+            resolved[key] = master(kind, name)
+        return resolved[key]
+
+    next_group = (
+        invoice.po_groups.aggregate(value=Max('urut'))['value'] or 0
+    )
+    for group in groups:
+        po_number = group.get('po_number', '')
+        po = None
+        if po_number:
+            po, _ = Po.objects.get_or_create(nomor=normalize_po(po_number))
+            if po.selesai:
+                raise ValidationError(f'{po.nomor} sudah selesai dan tidak dapat ditambah roll.')
+        invoice_po = (
+            invoice.po_groups.filter(po=po).first() if po else None
+        )
+        if not invoice_po:
+            next_group += 1
+            if next_group > 10:
+                raise ValidationError('Satu invoice maksimal berisi 10 grup PO.')
+            invoice_po = InvoicePo.objects.create(invoice=invoice, urut=next_group, po=po)
+        roll_data = group.get('rolls') or [
+            {
+                'yard': yard,
+                'material': group['material'],
+                'color': group['color'],
+                'lokasi': group.get('lokasi', ''),
+            }
+            for yard in group['yards']
+        ]
+        for item in roll_data:
+            material = resolve('material', item['material'])
+            color = resolve('color', item['color'])
+            lokasi = resolve('warehouse', item['lokasi']) if item.get('lokasi') else None
+            key = (material.pk, color.pk)
+            if key not in next_urut:
+                next_urut[key] = (
+                    invoice.roll_set.filter(material=material, color=color).aggregate(value=Max('urut'))[
+                        'value'
+                    ] or 0
+                )
+            next_urut[key] += 1
             pending.append(
                 Roll(
                     invoice=invoice,
+                    invoice_po=invoice_po,
                     material=material,
                     color=color,
                     lokasi=lokasi,
-                    urut=index,
-                    yard=yard,
+                    urut=next_urut[key],
+                    yard=item['yard'],
                     catatan=group.get('catatan', ''),
                 )
             )
@@ -344,6 +409,34 @@ def ubah_roll_invoice(invoice, submitted, user):
         changed += 1
     if changed:
         log(user, 'ubah roll', f'Invoice {invoice.nomor}', f'{changed} roll')
+
+
+@transaction.atomic
+def ubah_po_invoice(invoice, submitted, user):
+    changed = 0
+    for group in invoice.po_groups.select_for_update().select_related('po'):
+        key = f'existing-po-{group.pk}'
+        if key not in submitted:
+            continue
+        number = normalize_po(submitted[key])
+        if len(number) > 80:
+            raise ValidationError(f'PO {group.urut}: nomor maksimal 80 karakter.')
+        if number == (group.po.nomor if group.po_id else ''):
+            continue
+        if group.rolls.exclude(status='tersedia').exists():
+            raise ValidationError(f'PO {group.urut} sudah memiliki roll teralokasi dan terkunci.')
+        po = None
+        if number:
+            po, _ = Po.objects.get_or_create(nomor=number)
+            if po.selesai:
+                raise ValidationError(f'{po.nomor} sudah selesai.')
+            if invoice.po_groups.filter(po=po).exclude(pk=group.pk).exists():
+                raise ValidationError(f'{po.nomor} sudah dipakai grup PO lain di invoice ini.')
+        group.po = po
+        group.save(update_fields=['po'])
+        changed += 1
+    if changed:
+        log(user, 'ubah PO invoice', f'Invoice {invoice.nomor}', f'{changed} grup PO')
 
 
 @transaction.atomic

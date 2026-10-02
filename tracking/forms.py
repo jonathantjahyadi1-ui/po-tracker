@@ -20,6 +20,29 @@ class InvoiceForm(forms.Form):
     catatan = forms.CharField(
         label='Catatan', required=False, widget=forms.Textarea(attrs={'rows': 3})
     )
+    invoice_file = forms.FileField(
+        label='File invoice', required=False,
+        widget=forms.FileInput(attrs={'accept': '.pdf,.jpg,.jpeg,.png'}),
+    )
+
+    def clean_invoice_file(self):
+        upload = self.cleaned_data['invoice_file']
+        if not upload:
+            return None
+        if upload.size > 10 * 1024 * 1024:
+            raise forms.ValidationError('File invoice maksimal 10 MB.')
+        header = upload.read(12)
+        upload.seek(0)
+        name = upload.name.lower()
+        valid = (
+            (name.endswith('.pdf') and header.startswith(b'%PDF-'), 'application/pdf'),
+            (name.endswith(('.jpg', '.jpeg')) and header.startswith(b'\xff\xd8\xff'), 'image/jpeg'),
+            (name.endswith('.png') and header.startswith(b'\x89PNG\r\n\x1a\n'), 'image/png'),
+        )
+        upload.verified_content_type = next((mime for accepted, mime in valid if accepted), None)
+        if not upload.verified_content_type:
+            raise forms.ValidationError('Unggah invoice PDF, JPG, atau PNG yang valid.')
+        return upload
 
 
 class PoForm(forms.ModelForm):

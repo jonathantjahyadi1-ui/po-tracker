@@ -13,7 +13,10 @@ from django.urls import reverse
 from django.utils import timezone
 from openpyxl import Workbook, load_workbook
 
-from .models import Hasil, Invoice, KirimGudang, Master, Po, Roll, User, normalize_po
+from .models import (
+    Hasil, Invoice, InvoiceAttachment, InvoicePo, KirimGudang, Master, Po, Roll, User,
+    normalize_po,
+)
 from .parsers import import_yards, parse_yards, suspicious_yards
 from .services import (
     ajukan_alokasi,
@@ -331,6 +334,204 @@ class WorkflowTests(TestCase):
         invoice = Invoice.objects.get(nomor='INV-NEW')
         self.assertEqual(invoice.roll_set.count(), 5)
         self.assertEqual(sum(invoice.roll_set.values_list('yard', flat=True)), Decimal('399.00'))
+
+    def test_invoice_has_multiple_po_groups_with_individual_roll_yards(self):
+        self.client.force_login(self.user)
+        response = self.client.post(reverse('invoice_new'), {
+            'vendor': 'Vendor Baru',
+            'nomor': 'INV-MULTI-PO',
+            'surat_jalan': '',
+            'tanggal': self.today.isoformat(),
+            'total_rp': '0',
+            'catatan': '',
+            'po[]': ['po-101', ''],
+            'material[]': ['Cotton', 'Polyester'],
+            'color[]': ['Cream', 'Blue'],
+            'lokasi[]': ['', ''],
+            'catatan[]': ['', ''],
+            'yards[]': ['117 93', '46 83 60'],
+            'roll_details[]': [
+                '[{}, {"material": "Linen", "color": "Navy", "lokasi": "Gudang A"}]',
+                '[{}, {}, {}]',
+            ],
+        })
+        self.assertEqual(response.status_code, 302)
+        invoice = Invoice.objects.get(nomor='INV-MULTI-PO')
+        groups = list(InvoicePo.objects.filter(invoice=invoice).select_related('po'))
+        self.assertEqual(len(groups), 2)
+        self.assertEqual(groups[0].po.nomor, 'PO 101')
+        self.assertIsNone(groups[1].po_id)
+        first_rolls = list(groups[0].rolls.select_related('material', 'color', 'lokasi').order_by('id'))
+        self.assertEqual([roll.yard for roll in first_rolls], [Decimal('117.00'), Decimal('93.00')])
+        self.assertEqual(first_rolls[1].material.name, 'Linen')
+        self.assertEqual(first_rolls[1].color.name, 'Navy')
+        self.assertEqual(first_rolls[1].lokasi.name, 'Gudang A')
+        self.assertEqual(groups[1].rolls.count(), 3)
+        self.assertContains(
+            self.client.get(reverse('invoice_detail', args=[invoice.pk])), 'PO 101'
+        )
+        self.assertEqual(self.client.post(reverse('invoice_edit', args=[invoice.pk]), {
+            'vendor': 'Vendor Baru',
+            'nomor': 'INV-MULTI-PO',
+            'surat_jalan': '',
+            'tanggal': self.today.isoformat(),
+            'total_rp': '0',
+            'catatan': '',
+            'existing': '1',
+            'po[]': ['PO 101'],
+            'material[]': ['Cotton'],
+            'color[]': ['Cream'],
+            'yards[]': ['55'],
+        }).status_code, 302)
+        self.assertEqual(invoice.po_groups.count(), 2)
+        self.assertEqual(groups[0].rolls.count(), 3)
+        with self.assertRaisesMessage(ValidationError, 'satu grup PO'):
+            ajukan_alokasi(
+                [groups[0].rolls.first().pk, groups[1].rolls.first().pk],
+                'PO 101', self.cmt, self.user,
+            )
+        with self.assertRaisesMessage(ValidationError, 'PO 101'):
+            ajukan_alokasi([groups[0].rolls.first().pk], 'PO 999', self.cmt, self.user)
+        ajukan_alokasi([groups[1].rolls.first().pk], 'PO 202', self.cmt, self.user)
+        groups[1].refresh_from_db()
+        self.assertEqual(groups[1].po.nomor, 'PO 202')
+
+    def test_invoice_limits_po_groups_and_rejects_duplicate_numbers(self):
+        self.client.force_login(self.user)
+        data = {
+            'vendor': 'Vendor Baru',
+            'nomor': 'INV-TOO-MANY',
+            'tanggal': self.today.isoformat(),
+            'total_rp': '0',
+            'po[]': [''] * 11,
+            'material[]': ['Cotton'] * 11,
+            'color[]': ['Cream'] * 11,
+            'yards[]': ['1'] * 11,
+        }
+        response = self.client.post(reverse('invoice_new'), data)
+        self.assertContains(response, 'maksimal berisi 10 grup PO')
+        self.assertFalse(Invoice.objects.filter(nomor='INV-TOO-MANY').exists())
+        data['nomor'] = 'INV-DUP-PO'
+        data['po[]'] = ['po-101', 'PO 101']
+        data['material[]'] = ['Cotton', 'Cotton']
+        data['color[]'] = ['Cream', 'Cream']
+        data['yards[]'] = ['1', '2']
+        response = self.client.post(reverse('invoice_new'), data)
+        self.assertContains(response, 'sudah ada dalam invoice ini')
+        self.assertFalse(Invoice.objects.filter(nomor='INV-DUP-PO').exists())
+        data['nomor'] = 'INV-BAD-DETAIL'
+        data['po[]'] = ['']
+        data['material[]'] = ['Cotton']
+        data['color[]'] = ['Cream']
+        data['yards[]'] = ['1']
+        data['roll_details[]'] = ['[{}, {}]']
+        response = self.client.post(reverse('invoice_new'), data)
+        self.assertContains(response, 'jumlah detail roll tidak sesuai yard')
+        self.assertFalse(Invoice.objects.filter(nomor='INV-BAD-DETAIL').exists())
+
+    def test_invoice_po_number_can_be_corrected_before_allocation(self):
+        self.client.force_login(self.user)
+        group = self.invoice.po_groups.get()
+        data = {
+            'vendor': 'Vendor A',
+            'nomor': 'INV-1',
+            'surat_jalan': '',
+            'tanggal': self.invoice.tanggal.isoformat(),
+            'total_rp': '1000',
+            'catatan': '',
+            'existing': '1',
+            f'existing-po-{group.pk}': 'PO 101',
+        }
+        url = reverse('invoice_edit', args=[self.invoice.pk])
+        self.assertEqual(self.client.post(url, data).status_code, 302)
+        group.refresh_from_db()
+        self.assertEqual(group.po.nomor, 'PO 101')
+        allocation = ajukan_alokasi([self.rolls[0].pk], 'PO 101', self.cmt, self.user)
+        data[f'existing-po-{group.pk}'] = 'PO 102'
+        self.assertContains(self.client.post(url, data), 'terkunci')
+        group.refresh_from_db()
+        self.assertEqual(group.po.nomor, 'PO 101')
+        putuskan_alokasi(allocation, 'tolak', self.user, 'Salah PO')
+        self.assertEqual(self.client.post(url, data).status_code, 302)
+        group.refresh_from_db()
+        self.assertEqual(group.po.nomor, 'PO 102')
+
+    def test_invoice_attachment_upload_and_download(self):
+        self.client.force_login(self.user)
+        payload = {
+            'vendor': 'Vendor Baru',
+            'nomor': 'INV-UPLOAD',
+            'surat_jalan': '',
+            'tanggal': self.today.isoformat(),
+            'total_rp': '0',
+            'catatan': '',
+            'material[]': ['Cotton'],
+            'color[]': ['Cream'],
+            'lokasi[]': [''],
+            'yards[]': ['117 93'],
+            'invoice_file': SimpleUploadedFile(
+                'invoice.pdf', b'%PDF-1.7\nexample', content_type='application/pdf'
+            ),
+        }
+        self.assertEqual(self.client.post(reverse('invoice_new'), payload).status_code, 302)
+        invoice = Invoice.objects.get(nomor='INV-UPLOAD')
+        attachment = InvoiceAttachment.objects.get(invoice=invoice)
+        self.assertEqual(attachment.filename, 'invoice.pdf')
+        self.assertEqual(attachment.size, len(b'%PDF-1.7\nexample'))
+        download = self.client.get(reverse('invoice_attachment', args=[invoice.pk]))
+        self.assertEqual(download.status_code, 200)
+        self.assertEqual(download.content, b'%PDF-1.7\nexample')
+        self.assertIn('attachment;', download['Content-Disposition'])
+        self.client.force_login(self.director)
+        self.assertEqual(
+            self.client.get(reverse('invoice_attachment', args=[invoice.pk])).status_code, 200
+        )
+        self.client.force_login(self.admin)
+        self.assertEqual(
+            self.client.get(reverse('invoice_attachment', args=[invoice.pk])).status_code, 403
+        )
+        self.client.force_login(self.user)
+        edit = {
+            'vendor': 'Vendor Baru',
+            'nomor': 'INV-UPLOAD',
+            'surat_jalan': '',
+            'tanggal': self.today.isoformat(),
+            'total_rp': '0',
+            'catatan': '',
+            'existing': '1',
+        }
+        self.assertEqual(
+            self.client.post(reverse('invoice_edit', args=[invoice.pk]), edit).status_code,
+            302,
+        )
+        attachment.refresh_from_db()
+        self.assertEqual(attachment.filename, 'invoice.pdf')
+        edit['invoice_file'] = SimpleUploadedFile(
+            'scan.png', b'\x89PNG\r\n\x1a\nreplacement', content_type='image/png'
+        )
+        self.assertEqual(
+            self.client.post(reverse('invoice_edit', args=[invoice.pk]), edit).status_code,
+            302,
+        )
+        attachment.refresh_from_db()
+        self.assertEqual(attachment.filename, 'scan.png')
+        self.assertEqual(attachment.content_type, 'image/png')
+
+    def test_invalid_invoice_attachment_does_not_create_invoice(self):
+        self.client.force_login(self.user)
+        response = self.client.post(reverse('invoice_new'), {
+            'vendor': 'Vendor Baru',
+            'nomor': 'INV-BAD-FILE',
+            'tanggal': self.today.isoformat(),
+            'total_rp': '0',
+            'material[]': ['Cotton'],
+            'color[]': ['Cream'],
+            'yards[]': ['117'],
+            'invoice_file': SimpleUploadedFile('invoice.pdf', b'not a pdf'),
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'PDF, JPG, atau PNG yang valid')
+        self.assertFalse(Invoice.objects.filter(nomor='INV-BAD-FILE').exists())
 
 
 class ConcurrencyTests(TransactionTestCase):

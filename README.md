@@ -28,6 +28,12 @@ Copy-Item .env.example .env
 Admin dapat membuat akun purchasing dan direktur di halaman Akun. Untuk tampilan contoh,
 jalankan `manage.py seed_contoh` saat `DEBUG=true`.
 
+Di halaman Tambah bahan, satu invoice dapat memuat hingga 10 grup PO. Nomor PO boleh
+diisi saat input atau saat alokasi. Setiap roll memiliki yard sendiri; tombol
+"Bedakan detail tiap roll" membuka bahan, warna, dan lokasi khusus per roll.
+File invoice PDF, JPG, atau PNG (maksimal 10 MB) disimpan di database dan dapat
+diunduh dari halaman detail invoice.
+
 ## Variabel lingkungan
 
 - `DEBUG`: `true` untuk lokal; `false` untuk produksi.

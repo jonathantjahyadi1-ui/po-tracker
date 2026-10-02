@@ -3,6 +3,7 @@ from datetime import date
 from functools import wraps
 from hashlib import sha256
 from io import BytesIO
+import json
 
 from django.contrib import messages
 from django.contrib.auth import login, logout
@@ -12,10 +13,14 @@ from django.db import transaction
 from django.db.models import Count, Max, Prefetch, Q, Sum
 from django.http import HttpResponse, HttpResponseNotAllowed
 from django.shortcuts import get_object_or_404, redirect, render
+from django.utils.http import content_disposition_header
 from openpyxl import Workbook
 
 from .forms import AccountForm, InvoiceForm, LoginForm, PoForm
-from .models import Alokasi, Hasil, Invoice, KirimGudang, Log, Master, Po, Roll, User
+from .models import (
+    Alokasi, Hasil, Invoice, InvoiceAttachment, InvoicePo, KirimGudang, Log, Master,
+    Po, Roll, User, normalize_po,
+)
 from .parsers import import_yards, parse_yards, suspicious_yards
 from .services import (
     ajukan_alokasi,
@@ -31,6 +36,7 @@ from .services import (
     selesaikan_po,
     simpan_hasil,
     simpan_invoice,
+    ubah_po_invoice,
     ubah_roll_invoice,
     yard_total,
 )
@@ -303,18 +309,33 @@ def vendor_detail(request, pk):
 
 
 def posted_groups(request):
+    po_numbers = request.POST.getlist('po[]')
     names = request.POST.getlist('material[]')
     colors = request.POST.getlist('color[]')
     locations = request.POST.getlist('lokasi[]')
     notes = request.POST.getlist('catatan[]')
     texts = request.POST.getlist('yards[]')
+    detail_texts = request.POST.getlist('roll_details[]')
     groups = []
+    seen_po = set()
     for index, name in enumerate(names):
         text = texts[index] if index < len(texts) else ''
         upload = request.FILES.get(f'file-{index}')
-        if not name.strip() and not text.strip() and not upload:
+        po_number = normalize_po(po_numbers[index]) if index < len(po_numbers) else ''
+        if not name.strip() and not text.strip() and not upload and not po_number:
             continue
         yards, errors = parse_yards(text)
+        if errors:
+            raise ValidationError(errors)
+        text_yard_count = len(yards)
+        details = []
+        if index < len(detail_texts) and detail_texts[index]:
+            try:
+                details = json.loads(detail_texts[index])
+            except (TypeError, ValueError):
+                raise ValidationError(f'PO {index + 1}: detail roll tidak valid.')
+            if not isinstance(details, list) or len(details) != text_yard_count:
+                raise ValidationError(f'PO {index + 1}: jumlah detail roll tidak sesuai yard.')
         if upload:
             imported, file_errors = import_yards(upload)
             yards.extend(imported)
@@ -322,21 +343,47 @@ def posted_groups(request):
         if errors:
             raise ValidationError(errors)
         if not name.strip() or index >= len(colors) or not colors[index].strip():
-            raise ValidationError(f'Bahan {index + 1}: bahan dan warna wajib diisi.')
+            raise ValidationError(f'PO {index + 1}: bahan dan warna wajib diisi.')
         if not yards:
-            raise ValidationError(f'Bahan {index + 1}: masukkan yard per roll.')
+            raise ValidationError(f'PO {index + 1}: masukkan yard per roll.')
+        if len(groups) >= 10:
+            raise ValidationError('Satu invoice maksimal berisi 10 grup PO.')
+        if po_number:
+            if len(po_number) > 80:
+                raise ValidationError(f'PO {index + 1}: nomor PO maksimal 80 karakter.')
+            if po_number in seen_po:
+                raise ValidationError(f'{po_number} sudah ada dalam invoice ini.')
+            seen_po.add(po_number)
+        rolls = []
+        for at, yard in enumerate(yards):
+            detail = details[at] if at < len(details) else {}
+            if not isinstance(detail, dict):
+                raise ValidationError(f'PO {index + 1}: detail roll {at + 1} tidak valid.')
+            values = {}
+            for key, default in (
+                ('material', name),
+                ('color', colors[index]),
+                ('lokasi', locations[index] if index < len(locations) else ''),
+            ):
+                override = detail.get(key, '')
+                if not isinstance(override, str) or len(override) > 160:
+                    raise ValidationError(f'PO {index + 1}: {key} roll {at + 1} tidak valid.')
+                values[key] = override.strip() or default
+            rolls.append({'yard': yard, **values})
         groups.append(
             {
+                'po_number': po_number,
                 'material': name,
                 'color': colors[index],
                 'lokasi': locations[index] if index < len(locations) else '',
                 'catatan': notes[index] if index < len(notes) else '',
                 'yards': yards,
+                'rolls': rolls,
                 'suspicious': suspicious_yards(yards),
             }
         )
     if not groups and not request.POST.get('existing'):
-        raise ValidationError('Tambahkan setidaknya satu bahan.')
+        raise ValidationError('Tambahkan setidaknya satu PO.')
     return groups
 
 
@@ -346,7 +393,7 @@ def invoice_edit(request, pk=None):
     form_error = False
     existing = (
         list(
-            invoice.roll_set.select_related('material', 'color', 'lokasi').order_by(
+            invoice.roll_set.select_related('material', 'color', 'lokasi', 'invoice_po__po').order_by(
                 'material__name', 'color__name', 'urut'
             )
         )
@@ -354,13 +401,17 @@ def invoice_edit(request, pk=None):
         else []
     )
     initial = (
-        {key: getattr(invoice, key) for key in InvoiceForm.base_fields if key != 'vendor'}
+        {
+            key: getattr(invoice, key)
+            for key in InvoiceForm.base_fields
+            if key not in ('vendor', 'invoice_file')
+        }
         if invoice
         else {}
     )
     if invoice:
         initial['vendor'] = invoice.vendor.name
-    form = InvoiceForm(request.POST or None, initial=initial)
+    form = InvoiceForm(request.POST or None, request.FILES or None, initial=initial)
     if request.method == 'POST':
         write_only(request)
         try:
@@ -369,6 +420,7 @@ def invoice_edit(request, pk=None):
             groups = posted_groups(request)
             with transaction.atomic():
                 if invoice:
+                    ubah_po_invoice(invoice, request.POST, request.user)
                     ubah_roll_invoice(invoice, request.POST, request.user)
                 saved = simpan_invoice(form.cleaned_data, groups, request.user, invoice)
             messages.success(request, 'Invoice tersimpan.')
@@ -376,6 +428,20 @@ def invoice_edit(request, pk=None):
         except ValidationError as error:
             flash_error(request, error)
             form_error = True
+    po_groups = list(
+        invoice.po_groups.select_related('po').annotate(
+            roll_count=Count('rolls', distinct=True),
+            allocated_count=Count(
+                'rolls', filter=~Q(rolls__status='tersedia'), distinct=True
+            ),
+        )
+    ) if invoice else []
+    for group in po_groups:
+        group.field_name = f'existing-po-{group.pk}'
+        group.form_value = (
+            request.POST.get(group.field_name, group.po.nomor if group.po_id else '')
+            if form_error else (group.po.nomor if group.po_id else '')
+        )
     return render(
         request,
         'invoice_form.html',
@@ -384,11 +450,17 @@ def invoice_edit(request, pk=None):
             'active': 'vendor',
             'form': form,
             'invoice': invoice,
+            'attachment': (
+                InvoiceAttachment.objects.filter(invoice=invoice).defer('content').first()
+                if invoice else None
+            ),
             'existing': existing,
+            'po_groups': po_groups,
             'vendors': Master.objects.filter(kind='vendor', active=True),
             'materials': Master.objects.filter(kind='material', active=True),
             'colors': Master.objects.filter(kind='color', active=True),
             'warehouses': Master.objects.filter(kind='warehouse', active=True),
+            'pos': Po.objects.order_by('nomor'),
             'form_error': form_error,
         },
     )
@@ -399,9 +471,10 @@ def invoice_detail(request, pk):
     invoice = get_object_or_404(Invoice.objects.select_related('vendor'), pk=pk)
     rolls = list(
         invoice.roll_set.select_related(
-            'material', 'color', 'lokasi', 'alokasi__po', 'alokasi__cmt'
-        ).order_by('material__name', 'color__name', 'urut')
+            'material', 'color', 'lokasi', 'invoice_po__po', 'alokasi__po', 'alokasi__cmt'
+        ).order_by('invoice_po__urut', 'material__name', 'color__name', 'urut')
     )
+    attachment = InvoiceAttachment.objects.filter(invoice=invoice).defer('content').first()
     return render(
         request,
         'invoice_detail.html',
@@ -409,6 +482,8 @@ def invoice_detail(request, pk):
             'title': invoice.nomor,
             'active': 'vendor',
             'invoice': invoice,
+            'attachment': attachment,
+            'po_group_count': invoice.po_groups.count(),
             'rolls': rolls,
             'roll_count': roll_count(invoice.roll_set.all()),
             'yard_total': yard_total(invoice.roll_set.all()),
@@ -416,6 +491,16 @@ def invoice_detail(request, pk):
             'pos': Po.objects.all(),
         },
     )
+
+
+@access('purchasing', 'direktur')
+def invoice_attachment(request, pk):
+    attachment = get_object_or_404(InvoiceAttachment, invoice_id=pk)
+    response = HttpResponse(attachment.content, content_type=attachment.content_type)
+    response['Content-Disposition'] = content_disposition_header(True, attachment.filename)
+    response['Content-Length'] = attachment.size
+    response['Cache-Control'] = 'private, no-store'
+    return response
 
 
 @access('purchasing', 'direktur')
@@ -865,13 +950,14 @@ def invoice_export(request, pk):
     invoice = get_object_or_404(Invoice, pk=pk)
     rows = (
         Roll.objects.filter(invoice=invoice)
-        .select_related('material', 'color', 'alokasi__po', 'alokasi__cmt')
-        .order_by('material__name', 'color__name', 'urut')
+        .select_related('material', 'color', 'invoice_po__po', 'alokasi__po', 'alokasi__cmt')
+        .order_by('invoice_po__urut', 'material__name', 'color__name', 'urut')
     )
     return download_xlsx(
         f'invoice-{pk}',
         [
             'Invoice',
+            'Grup PO',
             'Bahan',
             'Warna',
             'Roll',
@@ -885,6 +971,10 @@ def invoice_export(request, pk):
         [
             [
                 invoice.nomor,
+                (
+                    roll.invoice_po.po.nomor if roll.invoice_po.po_id
+                    else f'PO {roll.invoice_po.urut}'
+                ) if roll.invoice_po_id else '',
                 roll.material.name,
                 roll.color.name,
                 roll.urut,

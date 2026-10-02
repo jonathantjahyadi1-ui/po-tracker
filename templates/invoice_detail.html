@@ -3,7 +3,8 @@
 <div class="page-head"><div><a class="back" href="{% url 'vendor_detail' invoice.vendor_id %}">{{ invoice.vendor.name }}</a>
   <h1>{{ invoice.nomor }}</h1><p>{{ invoice.tanggal|date:"d M Y" }} ·
   {{ roll_count }} roll · {{ yard_total|indo }} yd</p></div>
-  <div class="row-actions"><a class="button" href="{% url 'invoice_export' invoice.pk %}">Unduh Excel</a>
+  <div class="row-actions">{% if attachment %}<a class="button" href="{% url 'invoice_attachment' invoice.pk %}">Unduh file invoice</a>{% endif %}
+  <a class="button" href="{% url 'invoice_export' invoice.pk %}">Unduh Excel</a>
   {% if request.user.role == 'purchasing' and not invoice.dibatalkan %}
   <a class="button primary" href="{% url 'invoice_edit' invoice.pk %}">Ubah invoice</a>{% endif %}</div></div>
 <div class="meta-line"><span>Surat jalan: {{ invoice.surat_jalan|default:"—" }}</span>
@@ -13,23 +14,25 @@
   {% csrf_token %}
   <section class="panel"><div class="table-wrap wide-table-wrap"><table><thead><tr>
     {% if request.user.role == 'purchasing' and not invoice.dibatalkan %}
-    <th><input type="checkbox" id="select-all" aria-label="Pilih semua yang tersedia"></th>
+    <th>{% if po_group_count < 2 %}<input type="checkbox" id="select-all" aria-label="Pilih semua yang tersedia">{% endif %}</th>
     {% endif %}
     <th>Bahan</th><th>Warna</th><th class="num">Roll</th><th class="num">Yard</th>
     <th>Lokasi</th><th>Status</th><th>CMT</th><th>PO</th><th>Tgl kirim</th>
   </tr></thead><tbody>{% for roll in rolls %}
-    {% ifchanged roll.material_id roll.color_id %}
-    <tr class="group-row"><td colspan="10">
+    {% ifchanged roll.invoice_po_id roll.material_id roll.color_id %}
+    <tr class="group-row"><td colspan="{% if request.user.role == 'purchasing' and not invoice.dibatalkan %}10{% else %}9{% endif %}">
       {% if request.user.role == 'purchasing' and not invoice.dibatalkan %}
-      <label><input type="checkbox" data-select-group="{{ roll.material_id }}-{{ roll.color_id }}">
-        Pilih semua yang tersedia · {{ roll.material.name }} / {{ roll.color.name }}</label>
-      {% else %}{{ roll.material.name }} / {{ roll.color.name }}{% endif %}
+      <label><input type="checkbox" data-select-group="{{ roll.invoice_po_id|default:'legacy' }}-{{ roll.material_id }}-{{ roll.color_id }}">
+        Pilih semua yang tersedia · {% if roll.invoice_po %}PO {{ roll.invoice_po.urut }}{% if roll.invoice_po.po %} ({{ roll.invoice_po.po.nomor }}){% endif %} · {% endif %}{{ roll.material.name }} / {{ roll.color.name }}</label>
+      {% else %}{% if roll.invoice_po %}PO {{ roll.invoice_po.urut }}{% if roll.invoice_po.po %} ({{ roll.invoice_po.po.nomor }}){% endif %} · {% endif %}{{ roll.material.name }} / {{ roll.color.name }}{% endif %}
     </td></tr>{% endifchanged %}
     <tr class="{% if roll.tgl_kirim %}sent-row{% endif %}">
     {% if request.user.role == 'purchasing' and not invoice.dibatalkan %}
     <td>{% if roll.status == 'tersedia' %}<input type="checkbox" name="roll"
       value="{{ roll.pk }}" data-yard="{{ roll.yard }}"
-      data-group="{{ roll.material_id }}-{{ roll.color_id }}"
+      data-group="{{ roll.invoice_po_id|default:'legacy' }}-{{ roll.material_id }}-{{ roll.color_id }}"
+      data-invoice-po="{{ roll.invoice_po_id|default:'legacy' }}"
+      data-po="{{ roll.invoice_po.po.nomor|default:'' }}"
       aria-label="Pilih roll {{ roll.urut }}">
       {% endif %}</td>{% endif %}
     <td>{{ roll.material.name }}</td><td>{{ roll.color.name }}</td>

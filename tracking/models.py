@@ -97,6 +97,34 @@ class Invoice(Dated):
         return self.nomor
 
 
+class InvoiceAttachment(Dated):
+    invoice = models.OneToOneField(Invoice, on_delete=models.PROTECT, related_name='attachment')
+    filename = models.CharField(max_length=180)
+    content_type = models.CharField(max_length=40)
+    size = models.PositiveIntegerField()
+    content = models.BinaryField()
+
+
+class InvoicePo(Dated):
+    invoice = models.ForeignKey(Invoice, on_delete=models.PROTECT, related_name='po_groups')
+    urut = models.PositiveSmallIntegerField()
+    po = models.ForeignKey(Po, on_delete=models.PROTECT, null=True, blank=True)
+
+    class Meta:
+        ordering = ['urut']
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(urut__gte=1) & Q(urut__lte=10), name='invoice_po_urut_1_10'
+            ),
+            models.UniqueConstraint(fields=['invoice', 'urut'], name='invoice_po_urut_unique'),
+            models.UniqueConstraint(
+                fields=['invoice', 'po'],
+                condition=Q(po__isnull=False),
+                name='invoice_po_nomor_unique',
+            ),
+        ]
+
+
 class Alokasi(Dated):
     class Status(models.TextChoices):
         MENUNGGU = 'menunggu', 'Menunggu'
@@ -126,6 +154,9 @@ class Roll(Dated):
         RUSAK = 'rusak', 'Rusak'
 
     invoice = models.ForeignKey(Invoice, on_delete=models.PROTECT)
+    invoice_po = models.ForeignKey(
+        InvoicePo, on_delete=models.PROTECT, null=True, blank=True, related_name='rolls'
+    )
     material = models.ForeignKey(Master, on_delete=models.PROTECT, related_name='+')
     color = models.ForeignKey(Master, on_delete=models.PROTECT, related_name='+')
     lokasi = models.ForeignKey(

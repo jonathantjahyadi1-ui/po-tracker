@@ -14,6 +14,7 @@ urlpatterns = [
     path('invoice/<int:pk>/ubah/', views.invoice_edit, name='invoice_edit'),
     path('invoice/<int:pk>/batalkan/', views.invoice_cancel, name='invoice_cancel'),
     path('invoice/<int:pk>/unduh/', views.invoice_export, name='invoice_export'),
+    path('invoice/<int:pk>/lampiran/', views.invoice_attachment, name='invoice_attachment'),
     path('invoice/<int:pk>/', views.invoice_detail, name='invoice_detail'),
     path('alokasi/', views.allocation_list, name='allocation_list'),
     path('alokasi/ajukan/', views.allocation_create, name='allocation_create'),
