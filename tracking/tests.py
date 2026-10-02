@@ -14,7 +14,15 @@ from django.utils import timezone
 from openpyxl import Workbook, load_workbook
 
 from .models import (
-    Hasil, Invoice, InvoiceAttachment, InvoicePo, KirimGudang, Master, Po, Roll, User,
+    Hasil,
+    Invoice,
+    InvoiceAttachment,
+    InvoicePo,
+    KirimGudang,
+    Master,
+    Po,
+    Roll,
+    User,
     normalize_po,
 )
 from .parsers import import_yards, parse_yards, suspicious_yards
@@ -157,6 +165,57 @@ class WorkflowTests(TestCase):
         pindah_status([roll.pk], 'diterima', self.user, alasan='Salah input')
         pindah_status([roll.pk], 'tersedia', self.user)
         self.assertIsNone(Roll.objects.get(pk=roll.pk).alokasi_id)
+
+    def test_allocation_http_flow_with_optional_relations_empty(self):
+        self.client.force_login(self.user)
+        roll = self.rolls[0]
+        group = roll.invoice_po
+        self.assertIsNone(group.po_id)
+        self.assertIsNone(roll.alokasi_id)
+        self.assertEqual(
+            self.client.get(reverse('invoice_detail', args=[self.invoice.pk])).status_code, 200
+        )
+
+        response = self.client.post(reverse('allocation_create'), {
+            'roll': [str(roll.pk)], 'po': 'PO 109', 'cmt': str(self.cmt.pk),
+        })
+        self.assertEqual(response.status_code, 302)
+        allocation = Roll.objects.get(pk=roll.pk).alokasi
+        self.assertRedirects(response, reverse('allocation_detail', args=[allocation.pk]))
+        self.assertEqual(Roll.objects.get(pk=roll.pk).status, 'menunggu')
+        group.refresh_from_db()
+        self.assertEqual(group.po.nomor, 'PO 109')
+
+        detail = reverse('allocation_detail', args=[allocation.pk])
+        self.assertEqual(self.client.get(detail).status_code, 200)
+        self.assertRedirects(
+            self.client.post(detail, {'action': 'acc'}), detail
+        )
+        self.assertEqual(Roll.objects.get(pk=roll.pk).status, 'siap_kirim')
+        self.assertRedirects(
+            self.client.post(detail, {
+                'action': 'kirim', 'roll': [str(roll.pk)],
+                'tanggal': self.today.isoformat(), 'surat_jalan': 'SJ-1',
+            }), detail
+        )
+        self.assertEqual(Roll.objects.get(pk=roll.pk).status, 'dikirim')
+        self.assertRedirects(
+            self.client.post(detail, {
+                'action': 'terima', 'roll': [str(roll.pk)],
+                'tanggal': self.today.isoformat(),
+            }), detail
+        )
+        self.assertEqual(Roll.objects.get(pk=roll.pk).status, 'diterima')
+        self.assertEqual(
+            self.client.get(reverse('po_detail', args=[allocation.po_id])).status_code, 200
+        )
+        self.assertRedirects(
+            self.client.post(reverse('roll_status'), {
+                'action': 'terpakai', 'roll': [str(roll.pk)],
+            }, HTTP_REFERER=reverse('po_detail', args=[allocation.po_id])),
+            reverse('po_detail', args=[allocation.po_id]),
+        )
+        self.assertEqual(Roll.objects.get(pk=roll.pk).status, 'terpakai')
 
     def test_reject_and_cancel(self):
         allocation = ajukan_alokasi([self.rolls[0].pk], 'PO 109', self.cmt, self.user)
@@ -361,7 +420,9 @@ class WorkflowTests(TestCase):
         self.assertEqual(len(groups), 2)
         self.assertEqual(groups[0].po.nomor, 'PO 101')
         self.assertIsNone(groups[1].po_id)
-        first_rolls = list(groups[0].rolls.select_related('material', 'color', 'lokasi').order_by('id'))
+        first_rolls = list(
+            groups[0].rolls.select_related('material', 'color', 'lokasi').order_by('id')
+        )
         self.assertEqual([roll.yard for roll in first_rolls], [Decimal('117.00'), Decimal('93.00')])
         self.assertEqual(first_rolls[1].material.name, 'Linen')
         self.assertEqual(first_rolls[1].color.name, 'Navy')

@@ -7,7 +7,16 @@ from django.db.models import Count, Max, Sum
 from django.utils import timezone
 
 from .models import (
-    Alokasi, Hasil, Invoice, InvoiceAttachment, InvoicePo, KirimGudang, Log, Master, Po, Roll,
+    Alokasi,
+    Hasil,
+    Invoice,
+    InvoiceAttachment,
+    InvoicePo,
+    KirimGudang,
+    Log,
+    Master,
+    Po,
+    Roll,
     normalize_po,
 )
 
@@ -102,8 +111,9 @@ def po_balance(po):
 @transaction.atomic
 def pindah_status(rolls, ke, user, **kolom):
     ids = [item.pk if isinstance(item, Roll) else int(item) for item in rolls]
+    # PostgreSQL cannot lock the nullable tables joined by select_related.
     locked = list(
-        Roll.objects.select_for_update()
+        Roll.objects.select_for_update(of=('self',))
         .select_related('invoice', 'material', 'color', 'alokasi__po')
         .filter(pk__in=ids)
         .order_by('pk')
@@ -180,7 +190,7 @@ def ajukan_alokasi(roll_ids, nomor_po, cmt, user):
     if not ids:
         raise ValidationError('Pilih setidaknya satu roll.')
     locked = list(
-        Roll.objects.select_for_update()
+        Roll.objects.select_for_update(of=('self',))
         .select_related('alokasi__po', 'invoice_po__po')
         .filter(pk__in=ids)
         .order_by('pk')
@@ -328,9 +338,9 @@ def simpan_invoice(data, groups, user, invoice=None):
             key = (material.pk, color.pk)
             if key not in next_urut:
                 next_urut[key] = (
-                    invoice.roll_set.filter(material=material, color=color).aggregate(value=Max('urut'))[
-                        'value'
-                    ] or 0
+                    invoice.roll_set.filter(material=material, color=color)
+                    .aggregate(value=Max('urut'))['value']
+                    or 0
                 )
             next_urut[key] += 1
             pending.append(
@@ -366,7 +376,7 @@ def ubah_roll_invoice(invoice, submitted, user):
     from .parsers import parse_number
 
     rolls = (
-        Roll.objects.select_for_update()
+        Roll.objects.select_for_update(of=('self',))
         .select_related('material', 'color', 'lokasi')
         .filter(invoice=invoice)
         .order_by('pk')
@@ -414,7 +424,7 @@ def ubah_roll_invoice(invoice, submitted, user):
 @transaction.atomic
 def ubah_po_invoice(invoice, submitted, user):
     changed = 0
-    for group in invoice.po_groups.select_for_update().select_related('po'):
+    for group in invoice.po_groups.select_for_update(of=('self',)).select_related('po'):
         key = f'existing-po-{group.pk}'
         if key not in submitted:
             continue
