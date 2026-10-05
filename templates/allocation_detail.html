@@ -1,43 +1,15 @@
 {% extends 'base.html' %}{% load tracker %}
 {% block content %}
-<div class="page-head"><div><a class="back" href="{% url 'allocation_list' %}">Alokasi</a>
-  <h1>{{ allocation.po.nomor }}</h1><p>{{ allocation.cmt.name }} ·
-  {% include 'partials/status.html' with item=allocation %}</p></div></div>
+<div class="page-head"><div><a class="back" href="{% url 'allocation_list' %}">Alokasi</a><h1>Pengiriman {{ allocation.pk }}</h1><p>{{ allocation.cmt.name }} · {% include 'partials/status.html' with item=allocation %}</p></div><a class="button" href="{% url 'cmt_detail' allocation.cmt_id %}?allocation={{ allocation.pk }}#pengiriman-{{ allocation.pk }}">Lihat di CMT</a></div>
+<div class="meta-line standalone"><span>PO: {% if allocation.po_id %}<a href="{% url 'po_detail' allocation.po_id %}">{{ allocation.po.nomor }}</a>{% else %}Belum diisi{% endif %}</span><span>{{ rolls|length }} roll · {{ yard_total|indo }} yard</span><span>Diajukan: {{ allocation.created_at|date:"d M Y H:i" }}</span></div>
 {% if request.user.role == 'purchasing' and allocation.status == 'menunggu' %}
-<section class="panel form-section section-gap"><h2>Tinjau alokasi</h2><div class="decision-actions">
-  <form method="post" data-submit-form>{% csrf_token %}
-    <button class="button primary" name="action" value="acc">ACC alokasi</button></form>
-  <form method="post" data-submit-form>{% csrf_token %}
-    <label for="reject-reason">Alasan</label><input id="reject-reason" name="alasan" required>
-    <button class="button danger" name="action" value="tolak">Tolak</button></form>
-</div></section>{% endif %}
-{% if request.user.role == 'purchasing' and allocation.status == 'disetujui' %}
-<form method="post" class="inline-form section-gap" data-submit-form>{% csrf_token %}
-  <label for="cancel-reason">Alasan pembatalan</label><input id="cancel-reason" name="alasan" required>
-  <button class="button danger" name="action" value="batalkan">Batalkan alokasi</button>
-</form>{% endif %}
-<form method="post" data-submit-form>{% csrf_token %}
-  <section class="panel section-gap"><div class="table-wrap wide-table-wrap"><table><thead><tr>
-    {% if request.user.role == 'purchasing' %}<th><input type="checkbox" id="select-all" aria-label="Pilih semua roll"></th>{% endif %}
-    <th>Invoice</th><th>Bahan</th><th>Warna</th><th class="num">Roll</th>
-    <th class="num">Yard</th><th>Status</th><th>Tgl kirim</th><th>Tgl terima</th>
-  </tr></thead><tbody>{% for roll in rolls %}<tr>
-    {% if request.user.role == 'purchasing' %}<td><input type="checkbox" name="roll" value="{{ roll.pk }}"
-      aria-label="Pilih roll {{ roll.urut }}"></td>{% endif %}
-    <td>{{ roll.invoice.nomor }}</td><td>{{ roll.material.name }}</td>
-    <td>{{ roll.color.name }}</td><td class="num">{{ roll.urut }}</td>
-    <td class="num">{{ roll.yard|indo }}</td>
-    <td>{% include 'partials/status.html' with item=roll %}</td>
-    <td>{{ roll.tgl_kirim|date:"d M Y"|default:"—" }}</td>
-    <td>{{ roll.tgl_terima|date:"d M Y"|default:"—" }}</td></tr>{% endfor %}
-  </tbody></table></div></section>
-  {% if request.user.role == 'purchasing' and allocation.status == 'disetujui' %}
-  <div class="inline-form section-gap"><div class="field"><label for="action-date">Tanggal</label>
-    <input id="action-date" name="tanggal" type="date"></div>
-    <div class="field"><label for="send-note">Surat jalan (opsional)</label>
-      <input id="send-note" name="surat_jalan"></div>
-    <button class="button primary" name="action" value="kirim">Kirim roll terpilih</button>
-    <button class="button" name="action" value="terima">Terima roll terpilih</button>
-  </div>{% endif %}
-</form>
+<section class="panel form-section section-gap"><h2>Tinjau pengajuan</h2><p class="field-help">ACC mencatat pengiriman seluruh roll ke {{ allocation.cmt.name }}. Nomor PO diisi melalui CMT setelah bahan diterima.</p>
+<form method="post" class="section-gap" data-submit-form>{% csrf_token %}<div class="field-grid"><div class="field"><label for="approve-date">Tanggal kirim kain</label><input id="approve-date" name="tanggal" type="date" value="{{ default_ship_date }}" required></div><div class="field"><label for="approve-sj">Surat jalan kirim kain <span class="optional">opsional</span></label><input id="approve-sj" name="surat_jalan" maxlength="80"></div></div><div class="form-actions"><button type="submit" class="button primary" name="action" value="acc">ACC dan tandai dikirim</button></div></form>
+<form method="post" class="reject-form" data-submit-form>{% csrf_token %}<div class="field"><label for="reject-reason">Alasan penolakan</label><input id="reject-reason" name="alasan" required></div><button type="submit" class="button danger" name="action" value="tolak">Tolak pengajuan</button></form></section>
+{% endif %}
+<section class="panel section-gap"><div class="panel-head"><h2>Roll dalam pengiriman</h2></div><div class="table-wrap wide-table-wrap"><table><thead><tr><th>Vendor / invoice</th><th>Bahan</th><th>Warna</th><th class="num">Roll</th><th class="num">Yard</th><th>Status</th><th>Tgl kirim kain</th><th>Tgl terima bahan</th></tr></thead><tbody>{% for roll in rolls %}<tr><td>{{ roll.invoice.vendor.name }}<small class="cell-note"><a href="{% url 'invoice_detail' roll.invoice_id %}">{{ roll.invoice.nomor }}</a></small></td><td>{{ roll.material.name }}</td><td>{{ roll.color.name }}</td><td class="num">{{ roll.urut }}</td><td class="num">{{ roll.yard|indo }}</td><td>{% include 'partials/status.html' with item=roll %}</td><td>{{ roll.tgl_kirim|date:"d M Y"|default:"—" }}</td><td>{{ roll.tgl_terima|date:"d M Y"|default:"—" }}</td></tr>{% empty %}<tr><td colspan="8" class="empty">Tidak ada roll pada pengiriman ini.</td></tr>{% endfor %}</tbody></table></div></section>
+{% if allocation.status == 'disetujui' %}<p class="help-callout section-gap">Penerimaan bahan dan pengisian nomor PO dilakukan di <a href="{% url 'cmt_detail' allocation.cmt_id %}?allocation={{ allocation.pk }}#pengiriman-{{ allocation.pk }}">{{ allocation.cmt.name }}</a>.</p>{% endif %}
+{% if request.user.role == 'purchasing' and has_legacy_ready %}
+<section class="panel form-section section-gap"><h2>Pengiriman lama belum tercatat</h2><p class="field-help">Roll berstatus Siap kirim ini berasal dari alur sebelumnya. Catat tanggal kirim yang benar agar dapat diterima di CMT.</p><form method="post" data-submit-form>{% csrf_token %}<input type="hidden" name="action" value="kirim"><div class="legacy-rolls">{% for roll in rolls %}{% if roll.status == 'siap_kirim' %}<label><input type="checkbox" name="roll" value="{{ roll.pk }}">Roll {{ roll.urut }} · {{ roll.material.name }} / {{ roll.color.name }} · {{ roll.yard|indo }} yard</label>{% endif %}{% endfor %}</div><div class="field-grid"><div class="field"><label for="legacy-date">Tanggal kirim kain</label><input id="legacy-date" type="date" name="tanggal" required></div><div class="field"><label for="legacy-sj">Surat jalan kirim kain <span class="optional">opsional</span></label><input id="legacy-sj" name="surat_jalan"></div></div><div class="form-actions"><button class="button primary" type="submit">Catat pengiriman lama</button></div></form></section>{% endif %}
+{% if request.user.role == 'purchasing' and can_cancel %}<form method="post" class="inline-form section-gap" data-submit-form data-confirm="Batalkan pengiriman dan kembalikan roll yang belum diterima ke stok?">{% csrf_token %}<div class="field"><label for="cancel-reason">Alasan pembatalan</label><input id="cancel-reason" name="alasan" required></div><button type="submit" class="button danger" name="action" value="batalkan">Batalkan alokasi</button></form>{% endif %}
 {% endblock %}

@@ -1,17 +1,22 @@
-from datetime import timedelta
-from decimal import ROUND_HALF_UP, Decimal
+import hashlib
+import json
+from datetime import date, datetime, timedelta
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
-from django.core.exceptions import ValidationError
-from django.db import transaction
-from django.db.models import Count, Max, Sum
+from django.core.exceptions import PermissionDenied, ValidationError
+from django.db import IntegrityError, transaction
+from django.db.models import Count, Max, Q, Sum
 from django.utils import timezone
 
 from .models import (
     Alokasi,
+    AlokasiRoll,
     Hasil,
     Invoice,
     InvoiceAttachment,
-    InvoicePo,
+    InvoiceColor,
+    InvoiceMaterial,
+    InvoiceWrite,
     KirimGudang,
     Log,
     Master,
@@ -21,15 +26,21 @@ from .models import (
 )
 
 ZERO = Decimal('0.00')
+# Siap kirim and the production roll states remain readable for legacy data only.
 TRANSITIONS = {
     'tersedia': {'menunggu'},
-    'menunggu': {'siap_kirim', 'tersedia'},
+    'menunggu': {'dikirim', 'tersedia'},
     'siap_kirim': {'dikirim', 'tersedia'},
-    'dikirim': {'diterima', 'siap_kirim'},
-    'diterima': {'terpakai', 'rusak', 'tersedia'},
-    'terpakai': {'diterima'},
-    'rusak': {'diterima'},
+    'dikirim': {'diterima'},
+    'diterima': set(),
+    'terpakai': set(),
+    'rusak': set(),
 }
+
+
+def require_purchasing(user):
+    if not user.is_authenticated or not user.is_active or user.role != 'purchasing':
+        raise PermissionDenied('Hanya Purchasing yang dapat mengubah data operasional.')
 
 
 def log(user, aksi, objek, detail=''):
@@ -37,8 +48,20 @@ def log(user, aksi, objek, detail=''):
 
 
 def valid_date(value, label):
-    if value is None or value > timezone.localdate() + timedelta(days=1):
+    if (
+        not isinstance(value, date)
+        or isinstance(value, datetime)
+        or value > timezone.localdate() + timedelta(days=1)
+    ):
         raise ValidationError(f'{label} wajib diisi dan tidak boleh lebih dari besok.')
+
+
+def limited_text(value, label, max_length):
+    if value is None:
+        return ''
+    if not isinstance(value, str) or len(value) > max_length:
+        raise ValidationError(f'{label} maksimal {max_length} karakter.')
+    return value.strip()
 
 
 def master(kind, name):
@@ -47,12 +70,18 @@ def master(kind, name):
     name = ' '.join(name.split())
     if not name:
         raise ValidationError('Nama wajib diisi.')
+    if len(name) > 160:
+        raise ValidationError('Nama maksimal 160 karakter.')
     found = Master.objects.filter(kind=kind, name__iexact=name).first()
-    if found:
-        if not found.active:
-            raise ValidationError(f'{found.name} sudah nonaktif.')
-        return found
-    return Master.objects.create(kind=kind, name=name)
+    if not found:
+        try:
+            with transaction.atomic():
+                found = Master.objects.create(kind=kind, name=name)
+        except IntegrityError:
+            found = Master.objects.get(kind=kind, name__iexact=name)
+    if not found.active:
+        raise ValidationError(f'{found.name} sudah nonaktif.')
+    return found
 
 
 def roll_count(queryset):
@@ -63,11 +92,14 @@ def yard_total(queryset):
     return queryset.aggregate(value=Sum('yard'))['value'] or ZERO
 
 
+def po_rolls(po):
+    """Include unallocated invoice-only historical PO links without duplicating rolls."""
+    return Roll.objects.filter(Q(alokasi__po=po) | Q(alokasi__isnull=True, invoice_po__po=po))
+
+
 def yard_po(po, warna):
     return yard_total(
-        Roll.objects.filter(
-            alokasi__po=po, color=warna, status__in=['dikirim', 'diterima', 'terpakai']
-        )
+        po_rolls(po).filter(color=warna, status__in=['dikirim', 'diterima', 'terpakai'])
     )
 
 
@@ -78,7 +110,7 @@ def done(po, warna):
 
 
 def hitung_done(hasil, terkirim):
-    return (hasil or 0) - (terkirim or 0)
+    return None if hasil is None else hasil - (terkirim or 0)
 
 
 def pemakaian(po, warna):
@@ -92,61 +124,172 @@ def hitung_pemakaian(yard, hasil):
     return (yard / Decimal(hasil)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
 
 
-def po_balance(po):
-    rows = list(Hasil.objects.filter(po=po).values_list('color_id', 'pcs'))
-    if not rows:
-        return False
-    colors = set(Roll.objects.filter(alokasi__po=po).values_list('color_id', flat=True).distinct())
-    if colors != {color_id for color_id, _ in rows}:
-        return False
-    shipped = dict(
-        KirimGudang.objects.filter(po=po)
-        .values('color_id')
-        .annotate(total=Sum('pcs'))
-        .values_list('color_id', 'total')
+def _resolve_po(colors, results, shipments, last_shipment):
+    rows = []
+    for color_id, color in sorted(
+        colors.items(), key=lambda item: (item[1].name.casefold(), item[0])
+    ):
+        hasil = results.get(color_id)
+        shipped = shipments.get(color_id, 0)
+        delta = hitung_done(hasil, shipped)
+        remaining = None if delta is None else max(delta, 0)
+        over = 0 if delta is None else max(-delta, 0)
+        if hasil is None:
+            key, label = 'belum_ada_hasil', 'Belum ada hasil'
+        elif over:
+            key, label = 'lebih_kirim', f'Lebih kirim {over} pcs'
+        elif remaining:
+            key, label = 'kurang_kirim', f'Kurang kirim {remaining} pcs'
+        elif hasil > 0:
+            key, label = 'done', 'Done'
+        else:
+            key, label = 'belum_ada_produksi', 'Belum ada hasil produksi'
+        rows.append(
+            {
+                'color': color,
+                'color_id': color_id,
+                'hasil': hasil,
+                'has_result': hasil is not None,
+                'shipped': shipped,
+                'terkirim': shipped,
+                'remaining': remaining,
+                'over': over,
+                'status_key': key,
+                'status_label': label,
+            }
+        )
+    remaining = sum(row['remaining'] or 0 for row in rows)
+    over = sum(row['over'] for row in rows)
+    missing = [row['color'] for row in rows if not row['has_result']]
+    total_hasil = sum(results.values())
+    if over:
+        code, label = 'lebih_kirim', 'Lebih kirim'
+    elif remaining:
+        code, label = 'kurang_kirim', 'Kurang kirim'
+    elif not results:
+        code, label = 'belum_ada_hasil', 'Belum ada hasil'
+    elif missing:
+        code, label = 'belum_lengkap', 'Belum lengkap'
+    elif total_hasil == 0:
+        code, label = 'belum_ada_produksi', 'Belum ada hasil produksi'
+    else:
+        code, label = 'done', 'Done'
+    return {
+        'code': code,
+        'label': label,
+        'status_key': code,
+        'status_label': label,
+        'remaining': remaining,
+        'over': over,
+        'hasil': total_hasil,
+        'terkirim': sum(shipments.values()),
+        'missing_results': missing,
+        'is_done': code == 'done',
+        'last_shipment': last_shipment,
+        'rows': rows,
+    }
+
+
+def po_status_many(pos):
+    """One shared resolver, with a bounded number of queries for lists and exports."""
+    ids = [item.pk if isinstance(item, Po) else int(item) for item in pos]
+    if not ids:
+        return {}
+    color_ids = {po_id: set() for po_id in ids}
+    rolls = Roll.objects.filter(
+        Q(alokasi__po_id__in=ids) | Q(alokasi__isnull=True, invoice_po__po_id__in=ids)
+    ).values_list('alokasi__po_id', 'invoice_po__po_id', 'color_id')
+    for allocation_po, legacy_po, color_id in rolls:
+        color_ids[allocation_po or legacy_po].add(color_id)
+    results = {po_id: {} for po_id in ids}
+    for po_id, color_id, pcs in Hasil.objects.filter(po_id__in=ids).values_list(
+        'po_id', 'color_id', 'pcs'
+    ):
+        results[po_id][color_id] = pcs
+        color_ids[po_id].add(color_id)
+    shipments = {po_id: {} for po_id in ids}
+    last = {po_id: None for po_id in ids}
+    totals = (
+        KirimGudang.objects.filter(po_id__in=ids)
+        .values('po_id', 'color_id')
+        .annotate(total=Sum('pcs'), latest=Max('tanggal'))
     )
-    return all(pcs == shipped.get(color_id, 0) for color_id, pcs in rows)
+    for item in totals:
+        po_id, color_id = item['po_id'], item['color_id']
+        shipments[po_id][color_id] = item['total']
+        color_ids[po_id].add(color_id)
+        if last[po_id] is None or item['latest'] > last[po_id]:
+            last[po_id] = item['latest']
+    all_colors = Master.objects.in_bulk(set().union(*color_ids.values()))
+    return {
+        po_id: _resolve_po(
+            {color_id: all_colors[color_id] for color_id in color_ids[po_id]},
+            results[po_id],
+            shipments[po_id],
+            last[po_id],
+        )
+        for po_id in ids
+    }
+
+
+def po_status(po):
+    return po_status_many([po])[po.pk]
+
+
+def po_balance(po):
+    return po_status(po)['is_done']
+
+
+def _ids(values):
+    try:
+        ids = list(
+            dict.fromkeys(item.pk if isinstance(item, Roll) else int(item) for item in values)
+        )
+    except (TypeError, ValueError):
+        raise ValidationError('Pilihan roll tidak valid.')
+    if not ids:
+        raise ValidationError('Pilih setidaknya satu roll.')
+    return ids
 
 
 @transaction.atomic
 def pindah_status(rolls, ke, user, **kolom):
-    ids = [item.pk if isinstance(item, Roll) else int(item) for item in rolls]
-    # PostgreSQL cannot lock the nullable tables joined by select_related.
+    require_purchasing(user)
+    ids = _ids(rolls)
     locked = list(
         Roll.objects.select_for_update(of=('self',))
         .select_related('invoice', 'material', 'color', 'alokasi__po')
         .filter(pk__in=ids)
         .order_by('pk')
     )
-    if not ids or len(locked) != len(set(ids)):
+    if len(locked) != len(ids):
         raise ValidationError('Pilihan roll tidak ditemukan.')
     reason = kolom.get('alasan', '').strip()
     for roll in locked:
-        if roll.alokasi_id and roll.alokasi.po.selesai:
-            raise ValidationError('PO sudah selesai.')
         if ke not in TRANSITIONS.get(roll.status, set()):
-            po = roll.alokasi.po.nomor if roll.alokasi_id else '-'
             raise ValidationError(
-                f'Roll #{roll.urut} baru saja berubah status ke {roll.get_status_display()} '
-                f'untuk {po}. Muat ulang halaman.'
+                f'Roll #{roll.urut} baru saja berubah status ke {roll.get_status_display()}. '
+                'Muat ulang halaman.'
             )
-        if ke == 'menunggu' and roll.alokasi_id:
-            raise ValidationError(f'Roll #{roll.urut} sudah dialokasikan.')
-        if (roll.status, ke) in {
-            ('siap_kirim', 'tersedia'),
-            ('dikirim', 'siap_kirim'),
-            ('terpakai', 'diterima'),
-            ('rusak', 'diterima'),
-        } and not reason:
+        if ke == 'menunggu' and (roll.alokasi_id or roll.invoice.dibatalkan):
+            raise ValidationError(f'Roll #{roll.urut} sudah dialokasikan atau invoice dibatalkan.')
+        if ke == 'tersedia' and roll.alokasi_id and roll.alokasi.po_id:
+            raise ValidationError(
+                'Roll yang sudah terhubung PO tidak dapat dilepas melalui aksi biasa.'
+            )
+        if (roll.status, ke) == ('siap_kirim', 'tersedia') and not reason:
             raise ValidationError('Alasan wajib diisi.')
-        if ke == 'rusak' and not kolom.get('catatan', '').strip():
-            raise ValidationError('Catatan kerusakan wajib diisi.')
         if ke == 'dikirim':
-            valid_date(kolom.get('tgl_kirim'), 'Tanggal kirim')
+            kolom['sj_kirim'] = limited_text(
+                kolom.get('sj_kirim', ''), 'Surat jalan pengiriman kain', 80
+            )
+            valid_date(kolom.get('tgl_kirim'), 'Tanggal kirim kain')
             if kolom['tgl_kirim'] < roll.invoice.tanggal:
                 raise ValidationError('Tanggal kirim tidak boleh sebelum tanggal invoice.')
-        if ke == 'diterima' and roll.status == 'dikirim':
-            valid_date(kolom.get('tgl_terima'), 'Tanggal terima')
+        if ke == 'diterima':
+            valid_date(kolom.get('tgl_terima'), 'Tanggal terima bahan')
+            if roll.tgl_kirim is None:
+                raise ValidationError(f'Roll #{roll.urut} belum memiliki tanggal kirim kain.')
             if kolom['tgl_terima'] < roll.tgl_kirim:
                 raise ValidationError('Tanggal terima tidak boleh sebelum tanggal kirim.')
     for roll in locked:
@@ -162,13 +305,8 @@ def pindah_status(rolls, ke, user, **kolom):
         if ke == 'dikirim':
             roll.tgl_kirim = kolom['tgl_kirim']
             roll.sj_kirim = kolom.get('sj_kirim', '')
-        if before == 'dikirim' and ke == 'siap_kirim':
-            roll.tgl_kirim = None
-            roll.sj_kirim = ''
-        if ke == 'diterima' and before == 'dikirim':
+        if ke == 'diterima':
             roll.tgl_terima = kolom['tgl_terima']
-        if ke == 'rusak':
-            roll.catatan = kolom['catatan']
         roll.save()
         log(
             user,
@@ -180,107 +318,345 @@ def pindah_status(rolls, ke, user, **kolom):
 
 
 @transaction.atomic
-def ajukan_alokasi(roll_ids, nomor_po, cmt, user):
+def ajukan_alokasi(roll_ids, cmt, user):
+    require_purchasing(user)
+    # Serialize CMT activation checks while permitting FK references from a concurrent PO.
+    cmt = Master.objects.select_for_update(no_key=True).get(pk=cmt.pk)
     if cmt.kind != Master.Kind.CMT or not cmt.active:
         raise ValidationError('Pilih CMT aktif dari daftar.')
-    nomor = normalize_po(nomor_po)
-    if not nomor:
-        raise ValidationError('Nomor PO wajib diisi.')
-    ids = list(dict.fromkeys(int(value) for value in roll_ids))
-    if not ids:
-        raise ValidationError('Pilih setidaknya satu roll.')
+    ids = _ids(roll_ids)
+    invoice_ids = list(
+        Roll.objects.filter(pk__in=ids).values_list('invoice_id', flat=True).distinct()
+    )
+    if len(invoice_ids) != 1:
+        raise ValidationError('Pilih roll dari satu invoice untuk setiap pengajuan.')
+    invoice = Invoice.objects.select_for_update().get(pk=invoice_ids[0])
+    if invoice.dibatalkan:
+        raise ValidationError('Invoice yang dibatalkan tidak dapat dialokasikan.')
     locked = list(
         Roll.objects.select_for_update(of=('self',))
-        .select_related('alokasi__po', 'invoice_po__po')
+        .select_related('invoice')
         .filter(pk__in=ids)
         .order_by('pk')
     )
     if len(locked) != len(ids):
         raise ValidationError('Ada roll yang tidak ditemukan.')
+    if len({roll.invoice_id for roll in locked}) != 1:
+        raise ValidationError('Pilih roll dari satu invoice untuk setiap pengajuan.')
     for roll in locked:
         if roll.status != 'tersedia' or roll.alokasi_id:
-            po = roll.alokasi.po.nomor if roll.alokasi_id else 'PO lain'
-            raise ValidationError(f'Roll #{roll.urut} baru saja dialokasikan ke {po}.')
-    groups = {roll.invoice_po_id: roll.invoice_po for roll in locked if roll.invoice_po_id}
-    if len(groups) > 1 or (groups and any(not roll.invoice_po_id for roll in locked)):
-        raise ValidationError('Pilih roll dari satu grup PO untuk setiap pengajuan.')
-    po, _ = Po.objects.get_or_create(nomor=nomor)
-    if po.selesai:
-        raise ValidationError('PO sudah selesai.')
-    if groups:
-        group = next(iter(groups.values()))
-        if group.po_id and group.po_id != po.pk:
-            raise ValidationError(f'Roll pada PO {group.urut} sudah terkait ke {group.po.nomor}.')
-        if InvoicePo.objects.filter(invoice=group.invoice, po=po).exclude(pk=group.pk).exists():
-            raise ValidationError(f'{po.nomor} sudah dipakai grup PO lain di invoice ini.')
-        if not group.po_id:
-            group.po = po
-            group.save(update_fields=['po'])
-    alokasi = Alokasi.objects.create(po=po, cmt=cmt, dibuat_oleh=user)
+            raise ValidationError(f'Roll #{roll.urut} baru saja dialokasikan. Muat ulang halaman.')
+        if roll.invoice.dibatalkan:
+            raise ValidationError('Invoice yang dibatalkan tidak dapat dialokasikan.')
+    alokasi = Alokasi.objects.create(cmt=cmt, dibuat_oleh=user)
+    AlokasiRoll.objects.bulk_create([AlokasiRoll(alokasi=alokasi, roll=roll) for roll in locked])
     pindah_status(ids, 'menunggu', user, alokasi=alokasi)
-    log(user, 'ajukan', f'Alokasi #{alokasi.pk}', f'{po.nomor} · {cmt.name}')
+    log(user, 'ajukan', f'Alokasi #{alokasi.pk}', f'{cmt.name} · {len(ids)} roll; PO belum diisi')
     return alokasi
 
 
 @transaction.atomic
-def putuskan_alokasi(alokasi, aksi, user, alasan=''):
-    alokasi = Alokasi.objects.select_for_update().get(pk=alokasi.pk)
-    ids = list(Roll.objects.filter(alokasi=alokasi).values_list('id', flat=True))
+def putuskan_alokasi(alokasi, aksi, user, alasan='', tgl_kirim=None, sj_kirim=''):
+    require_purchasing(user)
+    alokasi = (
+        Alokasi.objects.select_for_update(of=('self',)).select_related('cmt').get(pk=alokasi.pk)
+    )
+    if aksi == 'acc' and alokasi.status == 'disetujui':
+        return alokasi
+    ids = list(Roll.objects.filter(alokasi=alokasi).order_by('pk').values_list('pk', flat=True))
     if aksi == 'acc' and alokasi.status == 'menunggu':
-        pindah_status(ids, 'siap_kirim', user)
+        if not alokasi.cmt.active or alokasi.cmt.kind != 'cmt':
+            raise ValidationError('CMT tujuan sudah nonaktif atau tidak valid.')
+        if tgl_kirim is None:
+            tgl_kirim = timezone.localdate()
+        sj_kirim = limited_text(sj_kirim, 'Surat jalan pengiriman kain', 80)
+        pindah_status(ids, 'dikirim', user, tgl_kirim=tgl_kirim, sj_kirim=sj_kirim)
         alokasi.status = 'disetujui'
         alokasi.acc_oleh = user
         alokasi.acc_pada = timezone.now()
+        alokasi.tgl_kirim, alokasi.sj_kirim = tgl_kirim, sj_kirim
     elif aksi in ('tolak', 'batalkan'):
         if aksi == 'tolak' and alokasi.status != 'menunggu':
             raise ValidationError('Hanya alokasi menunggu yang dapat ditolak.')
+        if alokasi.status not in ('menunggu', 'disetujui'):
+            raise ValidationError('Aksi alokasi tidak sesuai status.')
         if not alasan.strip():
             raise ValidationError('Alasan wajib diisi.')
-        available = list(
-            Roll.objects.filter(alokasi=alokasi, status__in=['menunggu', 'siap_kirim']).values_list(
-                'id', flat=True
+        if alokasi.po_id:
+            raise ValidationError(
+                'Alokasi sudah terhubung PO dan tidak dapat dibatalkan melalui aksi biasa.'
             )
-        )
-        if len(available) != len(ids):
-            raise ValidationError('Roll sudah dikirim. Batalkan pengiriman lebih dahulu.')
+        if (
+            Roll.objects.filter(alokasi=alokasi)
+            .exclude(status__in=['menunggu', 'siap_kirim'])
+            .exists()
+        ):
+            raise ValidationError(
+                'Roll sudah dikirim atau diterima dan tidak dapat dibatalkan melalui aksi biasa.'
+            )
         pindah_status(ids, 'tersedia', user, alasan=alasan)
         alokasi.status = 'ditolak' if aksi == 'tolak' else 'dibatalkan'
         alokasi.alasan = alasan.strip()
     else:
         raise ValidationError('Aksi alokasi tidak sesuai status.')
     alokasi.save()
-    log(user, aksi, f'Alokasi #{alokasi.pk}', alasan)
+    detail = (
+        f'Tanggal kirim kain {tgl_kirim}; surat jalan {sj_kirim or "—"}'
+        if aksi == 'acc'
+        else alasan
+    )
+    log(user, aksi, f'Alokasi #{alokasi.pk}', detail)
+    return alokasi
+
+
+@transaction.atomic
+def kirim_alokasi_legacy(alokasi, roll_ids, tgl_kirim, user, sj_kirim=''):
+    require_purchasing(user)
+    alokasi = Alokasi.objects.select_for_update().get(pk=alokasi.pk)
+    ids = _ids(roll_ids)
+    sj_kirim = limited_text(sj_kirim, 'Surat jalan pengiriman kain', 80)
+    if alokasi.status != 'disetujui':
+        raise ValidationError('Hanya alokasi legacy yang disetujui dapat dicatat kirim.')
+    if Roll.objects.filter(alokasi=alokasi, pk__in=ids, status='siap_kirim').count() != len(ids):
+        raise ValidationError('Pilih hanya roll Siap kirim pada pengiriman legacy ini.')
+    pindah_status(ids, 'dikirim', user, tgl_kirim=tgl_kirim, sj_kirim=sj_kirim)
+    log(user, 'kirim legacy', f'Alokasi #{alokasi.pk}', f'{len(ids)} roll; {tgl_kirim}')
+    return alokasi
+
+
+@transaction.atomic
+def terima_alokasi(alokasi, roll_ids, tgl_terima, user):
+    require_purchasing(user)
+    alokasi = Alokasi.objects.select_for_update().get(pk=alokasi.pk)
+    ids = _ids(roll_ids)
+    if alokasi.status != 'disetujui':
+        raise ValidationError('Pengiriman belum di-ACC.')
+    if Roll.objects.filter(alokasi=alokasi, pk__in=ids).count() != len(ids):
+        raise ValidationError('Pilihan roll bukan bagian dari pengiriman ini.')
+    selected = list(Roll.objects.select_for_update(of=('self',)).filter(pk__in=ids).order_by('pk'))
+    # A browser retry with exactly the saved receipt date is harmless.
+    if all(roll.status == 'diterima' and roll.tgl_terima == tgl_terima for roll in selected):
+        return selected
+    if any(roll.status != 'dikirim' for roll in selected):
+        raise ValidationError('Hanya roll Dikirim yang dapat dicatat sebagai Diterima.')
+    received = pindah_status(ids, 'diterima', user, tgl_terima=tgl_terima)
+    log(user, 'terima CMT', f'Alokasi #{alokasi.pk}', f'{len(ids)} roll; {tgl_terima}')
+    return received
+
+
+@transaction.atomic
+def tautkan_po(alokasi, nomor_po, user, produk=''):
+    require_purchasing(user)
+    alokasi = (
+        Alokasi.objects.select_for_update(of=('self',))
+        .select_related('po', 'cmt')
+        .get(pk=alokasi.pk)
+    )
+    nomor = normalize_po(nomor_po)
+    produk = ' '.join(produk.split())
+    if not nomor or len(nomor) > 80:
+        raise ValidationError('Nomor PO wajib diisi, maksimal 80 karakter.')
+    if len(produk) > 160:
+        raise ValidationError('Nama produk maksimal 160 karakter.')
+    if alokasi.po_id:
+        if alokasi.po.nomor == nomor:
+            return alokasi.po
+        raise ValidationError(f'Pengiriman ini sudah terhubung ke {alokasi.po.nomor}.')
+    rolls = list(
+        Roll.objects.select_for_update(of=('self',)).filter(alokasi=alokasi).order_by('pk')
+    )
+    if (
+        alokasi.status != 'disetujui'
+        or not rolls
+        or any(roll.status != 'diterima' for roll in rolls)
+    ):
+        raise ValidationError('Nomor PO baru dapat diisi setelah seluruh roll pengiriman Diterima.')
+    if not alokasi.cmt.active or alokasi.cmt.kind != 'cmt':
+        raise ValidationError('CMT tujuan sudah nonaktif atau tidak valid.')
+    po, created = Po.objects.get_or_create(
+        nomor=nomor, defaults={'cmt': alokasi.cmt, 'produk': produk}
+    )
+    po = Po.objects.select_for_update().get(pk=po.pk)
+    if po.cmt_id != alokasi.cmt_id:
+        if po.cmt_id is None:
+            raise ValidationError(
+                f'{po.nomor} adalah PO historis dengan CMT yang belum dipetakan. '
+                'Periksa riwayatnya.'
+            )
+        raise ValidationError(f'{po.nomor} sudah dimiliki CMT lain.')
+    alokasi.po = po
+    alokasi.save(update_fields=['po'])
+    log(
+        user,
+        'isi PO' if created else 'tautkan PO',
+        f'Alokasi #{alokasi.pk}',
+        f'{po.nomor} · {alokasi.cmt.name}',
+    )
+    return po
+
+
+@transaction.atomic
+def ubah_produk_po(po, produk, user, cmt=None):
+    require_purchasing(user)
+    po = Po.objects.select_for_update().get(pk=po.pk)
+    if cmt is not None and po.cmt_id != cmt.pk:
+        raise ValidationError('PO tidak dimiliki CMT ini.')
+    produk = ' '.join(produk.split())
+    if len(produk) > 160:
+        raise ValidationError('Nama produk maksimal 160 karakter.')
+    if po.produk != produk:
+        before = po.produk
+        po.produk = produk
+        po.save(update_fields=['produk'])
+        log(user, 'ubah produk', po.nomor, f'{before or "—"} → {produk or "—"}')
+    return po
+
+
+def _invoice_panels(groups):
+    """Accept new nested input and legacy yard imports, never create a PO."""
+    panels = []
+    for group in groups:
+        if group.get('po_number'):
+            raise ValidationError('Nomor PO diisi melalui CMT setelah bahan diterima.')
+        if 'rows' in group:
+            panels.append({'material': group['material'], 'rows': group['rows']})
+        elif group.get('rolls'):
+            # Historic import overrides are grouped by their actual material/color/location.
+            by_material = {}
+            for item in group['rolls']:
+                name = item['material']
+                key = ' '.join(name.split()).casefold()
+                panel = by_material.setdefault(key, {'material': name, 'rows': {}})
+                row_key = (
+                    item['color'].strip().casefold(),
+                    item.get('lokasi', '').strip().casefold(),
+                )
+                row = panel['rows'].setdefault(
+                    row_key, {'color': item['color'], 'lokasi': item.get('lokasi', ''), 'yards': []}
+                )
+                row['yards'].append(item['yard'])
+            panels.extend(
+                {'material': panel['material'], 'rows': list(panel['rows'].values())}
+                for panel in by_material.values()
+            )
+        else:
+            panels.append(
+                {
+                    'material': group['material'],
+                    'rows': [
+                        {
+                            'color': group['color'],
+                            'lokasi': group.get('lokasi', ''),
+                            'yards': group['yards'],
+                        }
+                    ],
+                }
+            )
+    return panels
+
+
+def _invoice_fingerprint(data, panels, user, invoice):
+    metadata = {
+        key: data[key]
+        for key in ('vendor', 'nomor', 'surat_jalan', 'tanggal', 'total_rp', 'existing_roll_input')
+        if key in data
+    }
+    upload = data.get('invoice_file')
+    if upload:
+        position = upload.tell()
+        upload.seek(0)
+        digest = hashlib.sha256(upload.read()).hexdigest()
+        upload.seek(position)
+        metadata['attachment'] = {
+            'filename': upload.name,
+            'size': upload.size,
+            'content_type': upload.verified_content_type,
+            'sha256': digest,
+        }
+    payload = {
+        'invoice_id': getattr(invoice, 'pk', None),
+        'user_id': user.pk,
+        'metadata': metadata,
+        'panels': panels,
+    }
+    content = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
+    return hashlib.sha256(content.encode('utf-8')).hexdigest()
+
+
+def _invoice_retry(request_id, fingerprint):
+    if not request_id:
+        return None
+    previous = InvoiceWrite.objects.select_related('invoice').filter(request_id=request_id).first()
+    if previous:
+        if previous.fingerprint != fingerprint:
+            raise ValidationError(
+                'Identitas permintaan invoice sudah digunakan untuk data berbeda.'
+            )
+        return previous.invoice
+    return None
 
 
 @transaction.atomic
 def simpan_invoice(data, groups, user, invoice=None):
+    require_purchasing(user)
+    panels = _invoice_panels(groups)
+    if invoice is None and not panels:
+        raise ValidationError('Isi minimal satu bahan, satu warna, dan satu roll.')
+    if invoice:
+        # Editing and cancellation both lock the invoice before reserving roll rows.
+        # This also keeps the outer edit transaction (ubah_roll -> simpan) in one order.
+        invoice = Invoice.objects.select_for_update().get(pk=invoice.pk)
+        if invoice.dibatalkan:
+            raise ValidationError('Invoice yang dibatalkan tidak dapat diubah.')
+    request_id = data.get('request_id')
+    if request_id == '':
+        request_id = None
+    if request_id is not None and (not isinstance(request_id, str) or len(request_id) > 64):
+        raise ValidationError('Identitas permintaan invoice tidak valid.')
+    fingerprint = _invoice_fingerprint(data, panels, user, invoice) if request_id else None
+    repeated = _invoice_retry(request_id, fingerprint)
+    if repeated:
+        return repeated
     vendor = master('vendor', data['vendor'])
+    # Serializes duplicate invoice numbers for the same vendor, including case variants.
+    vendor = Master.objects.select_for_update(no_key=True).get(pk=vendor.pk)
+    # A concurrent creation may finish while this request waits for the vendor lock.
+    repeated = _invoice_retry(request_id, fingerprint)
+    if repeated:
+        return repeated
     nomor = ' '.join(data['nomor'].split())
     valid_date(data['tanggal'], 'Tanggal invoice')
-    if not nomor:
-        raise ValidationError('Nomor invoice wajib diisi.')
+    if not nomor or len(nomor) > 80:
+        raise ValidationError('Nomor invoice wajib diisi, maksimal 80 karakter.')
+    if data.get('total_rp', ZERO) < 0:
+        raise ValidationError('Total rupiah tidak boleh negatif.')
+    if 'surat_jalan' in data:
+        invoice_delivery_note = limited_text(data['surat_jalan'], 'Surat jalan invoice', 80)
     if (
         Invoice.objects.filter(vendor=vendor, nomor__iexact=nomor)
         .exclude(pk=getattr(invoice, 'pk', None))
         .exists()
     ):
         raise ValidationError('Nomor invoice sudah dipakai vendor ini.')
-    if invoice and invoice.dibatalkan:
-        raise ValidationError('Invoice yang dibatalkan tidak dapat diubah.')
     if invoice:
-        allocated = invoice.roll_set.exclude(status='tersedia').exists()
+        allocated = (
+            invoice.roll_set.exclude(status='tersedia').exists()
+            or invoice.roll_set.filter(alokasi__isnull=False).exists()
+        )
         if allocated and (
             invoice.vendor_id != vendor.pk
             or invoice.nomor != nomor
             or invoice.tanggal != data['tanggal']
         ):
             raise ValidationError('Vendor, nomor, dan tanggal terkunci setelah alokasi.')
+        if data.get('existing_roll_input'):
+            ubah_roll_invoice(invoice, data['existing_roll_input'], user)
     else:
         invoice = Invoice(dibuat_oleh=user)
-    for key, value in data.items():
-        if key not in ('vendor', 'invoice_file'):
-            setattr(invoice, key, value)
-    invoice.vendor = vendor
+    for key in ('surat_jalan', 'tanggal', 'total_rp'):
+        if key in data:
+            setattr(invoice, key, invoice_delivery_note if key == 'surat_jalan' else data[key])
+    invoice.nomor, invoice.vendor = nomor, vendor
     invoice.save()
     upload = data.get('invoice_file')
     if upload:
@@ -294,75 +670,90 @@ def simpan_invoice(data, groups, user, invoice=None):
                 'content': upload.read(),
             },
         )
-    pending = []
-    next_urut = {}
-    resolved = {}
+    next_group = invoice.material_groups.aggregate(value=Max('urut'))['value'] or 0
+    if panels and invoice.material_groups.count() + len(panels) > 10:
+        raise ValidationError('Satu invoice maksimal berisi 10 panel bahan.')
+    pending, next_urut, resolved = [], {}, {}
 
     def resolve(kind, name):
-        key = (kind, name.strip().casefold())
+        key = (kind, ' '.join(name.split()).casefold())
         if key not in resolved:
             resolved[key] = master(kind, name)
         return resolved[key]
 
-    next_group = (
-        invoice.po_groups.aggregate(value=Max('urut'))['value'] or 0
-    )
-    for group in groups:
-        po_number = group.get('po_number', '')
-        po = None
-        if po_number:
-            po, _ = Po.objects.get_or_create(nomor=normalize_po(po_number))
-            if po.selesai:
-                raise ValidationError(f'{po.nomor} sudah selesai dan tidak dapat ditambah roll.')
-        invoice_po = (
-            invoice.po_groups.filter(po=po).first() if po else None
+    for panel in panels:
+        material = resolve('material', panel['material'])
+        if not panel['rows']:
+            raise ValidationError('Setiap bahan wajib memiliki minimal satu baris warna.')
+        next_group += 1
+        material_group = InvoiceMaterial.objects.create(
+            invoice=invoice, material=material, urut=next_group
         )
-        if not invoice_po:
-            next_group += 1
-            if next_group > 10:
-                raise ValidationError('Satu invoice maksimal berisi 10 grup PO.')
-            invoice_po = InvoicePo.objects.create(invoice=invoice, urut=next_group, po=po)
-        roll_data = group.get('rolls') or [
-            {
-                'yard': yard,
-                'material': group['material'],
-                'color': group['color'],
-                'lokasi': group.get('lokasi', ''),
-            }
-            for yard in group['yards']
-        ]
-        for item in roll_data:
-            material = resolve('material', item['material'])
-            color = resolve('color', item['color'])
-            lokasi = resolve('warehouse', item['lokasi']) if item.get('lokasi') else None
+        for row_no, row in enumerate(panel['rows'], 1):
+            color = resolve('color', row['color'])
+            lokasi = resolve('warehouse', row['lokasi']) if row.get('lokasi', '').strip() else None
+            if not row.get('yards'):
+                raise ValidationError(
+                    f'{material.name} / {color.name}: isi minimal satu yard roll.'
+                )
+            color_row = InvoiceColor.objects.create(
+                group=material_group, color=color, lokasi=lokasi, urut=row_no
+            )
             key = (material.pk, color.pk)
             if key not in next_urut:
                 next_urut[key] = (
-                    invoice.roll_set.filter(material=material, color=color)
-                    .aggregate(value=Max('urut'))['value']
+                    invoice.roll_set.filter(material=material, color=color).aggregate(
+                        value=Max('urut')
+                    )['value']
                     or 0
                 )
-            next_urut[key] += 1
-            pending.append(
-                Roll(
-                    invoice=invoice,
-                    invoice_po=invoice_po,
-                    material=material,
-                    color=color,
-                    lokasi=lokasi,
-                    urut=next_urut[key],
-                    yard=item['yard'],
-                    catatan=group.get('catatan', ''),
+            for raw in row['yards']:
+                try:
+                    yard = Decimal(raw).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+                except (InvalidOperation, TypeError, ValueError):
+                    raise ValidationError(f'{material.name} / {color.name}: yard tidak valid.')
+                if not yard.is_finite() or yard <= 0 or yard >= Decimal('100000000'):
+                    raise ValidationError(
+                        f'{material.name} / {color.name}: '
+                        'yard harus positif dan kurang dari 100.000.000.'
+                    )
+                next_urut[key] += 1
+                pending.append(
+                    Roll(
+                        invoice=invoice,
+                        invoice_color=color_row,
+                        material=material,
+                        color=color,
+                        lokasi=lokasi,
+                        urut=next_urut[key],
+                        yard=yard,
+                    )
                 )
-            )
     Roll.objects.bulk_create(pending)
+    if request_id:
+        try:
+            with transaction.atomic():
+                InvoiceWrite.objects.create(
+                    invoice=invoice, request_id=request_id, fingerprint=fingerprint
+                )
+        except IntegrityError:
+            if InvoiceWrite.objects.filter(request_id=request_id).exists():
+                raise ValidationError(
+                    'Identitas permintaan invoice sudah digunakan untuk data berbeda.'
+                )
+            raise
     log(user, 'simpan', f'Invoice {invoice.nomor}', f'{len(pending)} roll baru')
     return invoice
 
 
 @transaction.atomic
 def batalkan_invoice(invoice, user):
-    if invoice.roll_set.exclude(status='tersedia').exists():
+    require_purchasing(user)
+    invoice = Invoice.objects.select_for_update().get(pk=invoice.pk)
+    rolls = list(
+        Roll.objects.select_for_update(of=('self',)).filter(invoice=invoice).order_by('pk')
+    )
+    if any(roll.status != 'tersedia' or roll.alokasi_id for roll in rolls):
         raise ValidationError('Invoice dengan roll teralokasi tidak dapat dibatalkan.')
     invoice.dibatalkan = True
     invoice.save(update_fields=['dibatalkan'])
@@ -371,13 +762,15 @@ def batalkan_invoice(invoice, user):
 
 @transaction.atomic
 def ubah_roll_invoice(invoice, submitted, user):
-    from decimal import InvalidOperation
-
     from .parsers import parse_number
 
+    require_purchasing(user)
+    invoice = Invoice.objects.select_for_update().get(pk=invoice.pk)
+    if invoice.dibatalkan:
+        raise ValidationError('Invoice yang dibatalkan tidak dapat diubah.')
     rolls = (
         Roll.objects.select_for_update(of=('self',))
-        .select_related('material', 'color', 'lokasi')
+        .select_related('material', 'color', 'lokasi', 'invoice_color__group')
         .filter(invoice=invoice)
         .order_by('pk')
     )
@@ -388,21 +781,26 @@ def ubah_roll_invoice(invoice, submitted, user):
             continue
         try:
             yard = parse_number(submitted[prefix])
-        except InvalidOperation:
+        except (InvalidOperation, TypeError, ValueError):
             raise ValidationError(f'Yard roll {roll.urut} tidak valid.')
+        if not yard.is_finite() or yard <= 0 or yard >= Decimal('100000000'):
+            raise ValidationError(
+                f'Yard roll {roll.urut} harus positif dan kurang dari 100.000.000.'
+            )
         material_name = submitted.get(prefix + '-material', roll.material.name)
         color_name = submitted.get(prefix + '-color', roll.color.name)
         location_name = submitted.get(prefix + '-lokasi', roll.lokasi.name if roll.lokasi else '')
-        differs = (
-            yard != roll.yard
-            or material_name.strip().casefold() != roll.material.name.casefold()
-            or color_name.strip().casefold() != roll.color.name.casefold()
-            or location_name.strip().casefold()
-            != (roll.lokasi.name.casefold() if roll.lokasi else '')
+        differs = yard != roll.yard or any(
+            (
+                material_name.strip().casefold() != roll.material.name.casefold(),
+                color_name.strip().casefold() != roll.color.name.casefold(),
+                location_name.strip().casefold()
+                != (roll.lokasi.name.casefold() if roll.lokasi else ''),
+            )
         )
         if not differs:
             continue
-        if roll.status != 'tersedia':
+        if roll.status != 'tersedia' or roll.alokasi_id:
             raise ValidationError(f'Roll {roll.urut} sudah dialokasikan dan terkunci.')
         material = master('material', material_name)
         color = master('color', color_name)
@@ -414,72 +812,123 @@ def ubah_roll_invoice(invoice, submitted, user):
                 )['value']
                 or 0
             ) + 1
+        # Reattach to a matching material/color row; preserve historical InvoicePo links.
+        material_group = invoice.material_groups.filter(material=material).first()
+        if not material_group:
+            if invoice.material_groups.count() >= 10:
+                raise ValidationError('Satu invoice maksimal berisi 10 panel bahan.')
+            urut = (invoice.material_groups.aggregate(value=Max('urut'))['value'] or 0) + 1
+            material_group = InvoiceMaterial.objects.create(
+                invoice=invoice, material=material, urut=urut
+            )
+        color_row = material_group.color_rows.filter(color=color, lokasi=lokasi).first()
+        if not color_row:
+            urut = (material_group.color_rows.aggregate(value=Max('urut'))['value'] or 0) + 1
+            color_row = InvoiceColor.objects.create(
+                group=material_group, color=color, lokasi=lokasi, urut=urut
+            )
         roll.material, roll.color, roll.lokasi, roll.yard = material, color, lokasi, yard
+        roll.invoice_color = color_row
         roll.save()
         changed += 1
     if changed:
         log(user, 'ubah roll', f'Invoice {invoice.nomor}', f'{changed} roll')
 
 
-@transaction.atomic
 def ubah_po_invoice(invoice, submitted, user):
-    changed = 0
-    for group in invoice.po_groups.select_for_update(of=('self',)).select_related('po'):
-        key = f'existing-po-{group.pk}'
-        if key not in submitted:
-            continue
-        number = normalize_po(submitted[key])
-        if len(number) > 80:
-            raise ValidationError(f'PO {group.urut}: nomor maksimal 80 karakter.')
-        if number == (group.po.nomor if group.po_id else ''):
-            continue
-        if group.rolls.exclude(status='tersedia').exists():
-            raise ValidationError(f'PO {group.urut} sudah memiliki roll teralokasi dan terkunci.')
-        po = None
-        if number:
-            po, _ = Po.objects.get_or_create(nomor=number)
-            if po.selesai:
-                raise ValidationError(f'{po.nomor} sudah selesai.')
-            if invoice.po_groups.filter(po=po).exclude(pk=group.pk).exists():
-                raise ValidationError(f'{po.nomor} sudah dipakai grup PO lain di invoice ini.')
-        group.po = po
-        group.save(update_fields=['po'])
-        changed += 1
-    if changed:
-        log(user, 'ubah PO invoice', f'Invoice {invoice.nomor}', f'{changed} grup PO')
+    require_purchasing(user)
+    if any(key.startswith('existing-po-') for key in submitted):
+        raise ValidationError('Nomor PO diisi melalui CMT; hubungan PO historis tetap disimpan.')
 
 
 @transaction.atomic
 def simpan_hasil(po, color, pcs, user):
-    if po.selesai:
-        raise ValidationError('PO sudah selesai.')
-    if not Roll.objects.filter(alokasi__po=po, color=color).exists():
+    require_purchasing(user)
+    po = Po.objects.select_for_update().get(pk=po.pk)
+    if not po_rolls(po).filter(color=color).exists():
         raise ValidationError('Warna belum memiliki roll di PO ini.')
-    if pcs < 0:
-        raise ValidationError('Hasil tidak boleh negatif.')
-    Hasil.objects.update_or_create(po=po, color=color, defaults={'pcs': pcs})
-    log(user, 'hasil', po.nomor, f'{color.name}: {pcs} pcs')
+    if not isinstance(pcs, int) or isinstance(pcs, bool) or pcs < 0:
+        raise ValidationError('Hasil harus bilangan bulat tidak negatif.')
+    shipped = (
+        KirimGudang.objects.filter(po=po, color=color).aggregate(total=Sum('pcs'))['total'] or 0
+    )
+    if pcs < shipped:
+        raise ValidationError(
+            f'Hasil {color.name} tidak boleh lebih kecil dari total kiriman {shipped} pcs.'
+        )
+    before = Hasil.objects.filter(po=po, color=color).values_list('pcs', flat=True).first()
+    if before == pcs:
+        return Hasil.objects.get(po=po, color=color)
+    hasil, _ = Hasil.objects.update_or_create(po=po, color=color, defaults={'pcs': pcs})
+    log(
+        user,
+        'hasil',
+        po.nomor,
+        f'{color.name}: {before if before is not None else "belum diisi"} → {pcs} pcs',
+    )
+    return hasil
 
 
 @transaction.atomic
 def kirim_gudang(po, color, data, user):
-    if po.selesai:
-        raise ValidationError('PO sudah selesai.')
-    if not Roll.objects.filter(alokasi__po=po, color=color).exists():
+    require_purchasing(user)
+    po = Po.objects.select_for_update().get(pk=po.pk)
+    payload = dict(data)
+    request_id = payload.pop('request_id', None)
+    if request_id == '':
+        request_id = None
+    if request_id is not None and (not isinstance(request_id, str) or len(request_id) > 64):
+        raise ValidationError('Identitas permintaan kiriman tidak valid.')
+    payload['surat_jalan'] = limited_text(payload.get('surat_jalan', ''), 'Surat jalan gudang', 80)
+    if request_id:
+        previous = KirimGudang.objects.filter(request_id=request_id).first()
+        if previous:
+            if (
+                previous.po_id != po.pk
+                or previous.color_id != color.pk
+                or any(getattr(previous, key) != value for key, value in payload.items())
+            ):
+                raise ValidationError('Identitas permintaan sudah digunakan untuk kiriman berbeda.')
+            return previous
+    if not po_rolls(po).filter(color=color).exists():
         raise ValidationError('Warna belum memiliki roll di PO ini.')
-    valid_date(data['tanggal'], 'Tanggal kirim gudang')
-    if data['pcs'] <= 0:
-        raise ValidationError('Jumlah pcs harus lebih dari 0.')
-    KirimGudang.objects.create(po=po, color=color, **data)
-    log(user, 'kirim gudang', po.nomor, f'{color.name}: {data["pcs"]} pcs')
+    valid_date(payload['tanggal'], 'Tanggal kirim gudang')
+    pcs = payload['pcs']
+    if not isinstance(pcs, int) or isinstance(pcs, bool) or pcs <= 0:
+        raise ValidationError('Jumlah pcs harus bilangan bulat lebih dari 0.')
+    hasil = Hasil.objects.filter(po=po, color=color).values_list('pcs', flat=True).first()
+    if hasil is None:
+        raise ValidationError(f'Isi hasil produksi {color.name} sebelum mencatat kiriman.')
+    shipped = (
+        KirimGudang.objects.filter(po=po, color=color).aggregate(total=Sum('pcs'))['total'] or 0
+    )
+    remaining = max(hasil - shipped, 0)
+    if pcs > remaining:
+        raise ValidationError(
+            f'Kiriman {pcs} pcs melebihi sisa {color.name} {remaining} pcs '
+            f'(hasil {hasil}, terkirim {shipped}).'
+        )
+    gudang = payload.get('gudang')
+    if gudang is not None and (gudang.kind != 'warehouse' or not gudang.active):
+        raise ValidationError('Pilih gudang aktif dari daftar.')
+    try:
+        with transaction.atomic():
+            shipment = KirimGudang.objects.create(
+                po=po, color=color, request_id=request_id, **payload
+            )
+    except IntegrityError:
+        if request_id and KirimGudang.objects.filter(request_id=request_id).exists():
+            raise ValidationError('Identitas permintaan sudah digunakan untuk kiriman berbeda.')
+        raise
+    log(user, 'kirim gudang', po.nomor, f'{color.name}: {pcs} pcs; {payload["tanggal"]}')
+    return shipment
 
 
-@transaction.atomic
 def selesaikan_po(po, user):
+    require_purchasing(user)
+    # Retained as an import-compatible check; manual completion no longer changes data.
     if not po_balance(po):
-        raise ValidationError('PO belum balance.')
-    if Roll.objects.filter(alokasi__po=po, status__in=['dikirim', 'diterima']).exists():
-        raise ValidationError('Masih ada roll dikirim atau diterima.')
-    po.selesai = True
-    po.save(update_fields=['selesai'])
-    log(user, 'selesai', po.nomor)
+        raise ValidationError(
+            'PO belum Done; status dihitung otomatis dari hasil dan kiriman per warna.'
+        )
+    return po

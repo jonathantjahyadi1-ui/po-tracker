@@ -1,30 +1,11 @@
 {% extends 'base.html' %}{% load tracker %}
 {% block content %}
-<div class="page-head"><div><a class="back" href="{% url 'vendor_list' %}">Vendor</a>
-  <h1>{{ vendor.name }}</h1></div>{% if request.user.role == 'purchasing' %}
-  <a class="button primary" href="{% url 'invoice_new' %}">Tambah bahan</a>{% endif %}</div>
-{% for invoice in invoices %}
-<section class="panel section-gap">
-  <div class="panel-head"><div><h2><a href="{% url 'invoice_detail' invoice.pk %}">{{ invoice.nomor }}</a></h2>
-    <p>Surat jalan {{ invoice.surat_jalan|default:"—" }} · {{ invoice.tanggal|date:"d M Y" }}
-      · Rp {{ invoice.total_rp|indo }} · {{ invoice.yards|indo }} yd</p></div>
-    <a href="{% url 'invoice_detail' invoice.pk %}">Lihat roll</a></div>
-  <div class="table-wrap wide-table-wrap"><table><thead><tr><th>Bahan / warna</th>
-    <th class="num">Roll</th><th class="num">Yard</th>
-    {% for date in invoice.dates %}<th>{{ date|date:"d M Y" }}</th>{% endfor %}
-    <th>Dialokasikan, belum kirim</th><th class="num">Sisa tersedia</th>
-  </tr></thead><tbody>{% for row in invoice.rows %}
-  <tr><td>{{ row.material.name }} / {{ row.color.name }}</td>
-    <td class="num">{{ row.rolls }}</td><td class="num">{{ row.yard|indo }}</td>
-    {% for date in invoice.dates %}<td>
-      {% with sent=row.sent|get:date %}{% for cmt,count in sent.items %}
-      <span class="nowrap">{{ count }} roll → {{ cmt }}</span><br>
-      {% endfor %}{% endwith %}</td>{% endfor %}
-    <td>{% for cmt,count in row.pending.items %}{{ count }} roll · {{ cmt }}<br>{% endfor %}</td>
-    <td class="num">{{ row.available }}</td></tr>{% endfor %}
-  </tbody></table></div>
-</section>
-{% empty %}<section class="panel empty">Belum ada invoice untuk vendor ini.
-  {% if request.user.role == 'purchasing' %}<a href="{% url 'invoice_new' %}">Tambah bahan</a>{% endif %}
-</section>{% endfor %}
+<div class="page-head"><div><a class="back" href="{% url 'vendor_list' %}">Vendor</a><h1>{{ vendor.name }}</h1><p>Cari invoice untuk melihat bahan dan memilih roll yang akan dialokasikan.</p></div>{% if request.user.role == 'purchasing' %}<a class="button primary" href="{% url 'invoice_new' %}">Tambah bahan</a>{% endif %}</div>
+<form method="get" class="filters invoice-search" role="search"><div class="field"><label for="invoice-query">Cari nomor invoice</label><input id="invoice-query" name="q" value="{{ q|default:'' }}" placeholder="Cari nomor invoice…" type="search"></div><button class="button primary" type="submit">Cari</button>{% if q %}<a class="button" href="{% url 'vendor_detail' vendor.pk %}">Hapus pencarian</a>{% endif %}</form>
+<div class="list-context"><span>{{ invoice_count }} invoice{% if q %} ditemukan untuk “{{ q }}”{% endif %}</span><span>{{ vendor.name }}</span></div>
+<section class="panel"><div class="table-wrap"><table><thead><tr><th>Nomor invoice</th><th>Tanggal</th><th class="num">Jumlah roll</th><th class="num">Total yard</th><th class="num">Total rupiah</th><th></th></tr></thead><tbody>
+{% for invoice in invoices %}<tr><td><a class="ref" href="{% url 'invoice_detail' invoice.pk %}?back={{ request.get_full_path|urlencode }}">{{ invoice.nomor }}</a><small class="cell-note">Surat jalan: {{ invoice.surat_jalan|default:"—" }}</small></td><td class="nowrap">{{ invoice.tanggal|date:"d M Y" }}</td><td class="num">{{ invoice.roll_count|default:0 }} roll</td><td class="num">{{ invoice.yards|indo }} yard</td><td class="num">Rp {{ invoice.total_rp|indo }}</td><td><a href="{% url 'invoice_detail' invoice.pk %}?back={{ request.get_full_path|urlencode }}">Lihat invoice</a></td></tr>
+{% empty %}<tr><td colspan="6" class="empty">{% if q %}<strong>Tidak ada invoice yang cocok dengan pencarian ini.</strong><p>Periksa nomor invoice atau <a href="{% url 'vendor_detail' vendor.pk %}">hapus pencarian</a>.</p>{% else %}<strong>Belum ada invoice untuk vendor ini.</strong>{% if request.user.role == 'purchasing' %}<p><a href="{% url 'invoice_new' %}">Tambah bahan</a> untuk mencatat pembelian pertama.</p>{% endif %}{% endif %}</td></tr>{% endfor %}
+</tbody></table></div></section>
+{% if page_obj.has_other_pages %}<nav class="pagination" aria-label="Halaman invoice">{% if page_obj.has_previous %}<a class="button small" href="?q={{ q|urlencode }}&amp;page={{ page_obj.previous_page_number }}">Sebelumnya</a>{% endif %}<span>Halaman {{ page_obj.number }} dari {{ page_obj.paginator.num_pages }}</span>{% if page_obj.has_next %}<a class="button small" href="?q={{ q|urlencode }}&amp;page={{ page_obj.next_page_number }}">Berikutnya</a>{% endif %}</nav>{% endif %}
 {% endblock %}

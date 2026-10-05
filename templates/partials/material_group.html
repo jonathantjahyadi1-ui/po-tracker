@@ -1,0 +1,7 @@
+﻿<section class="panel material-group section-gap" data-group>
+  <div class="panel-head"><div><h2>Nama bahan <span data-group-number>{{ group_index|add:1 }}</span><span data-material-title></span></h2></div><button class="button small" type="button" data-remove-group>Hapus bahan</button></div>
+  <div class="material-field field"><label for="group-{{ group_index }}-material">Nama bahan</label><input id="group-{{ group_index }}-material" name="groups-{{ group_index }}-material" value="{{ group.material|default:'' }}" list="material-options" maxlength="160" data-material-input {% if not existing %}required{% endif %}>{% for error in group.errors %}<p class="field-error">{{ error }}</p>{% endfor %}</div>
+  <input type="hidden" name="groups-{{ group_index }}-row_count" value="{{ group.rows|length|default:1 }}" data-row-count>
+  <div data-color-rows>{% if group.rows %}{% for row in group.rows %}{% include 'partials/color_row.html' with row=row group_index=group_index row_index=forloop.counter0 %}{% endfor %}{% else %}{% include 'partials/color_row.html' with group_index=group_index row_index=0 %}{% endif %}</div>
+  <div class="material-footer"><button class="button small" type="button" data-add-color>Tambah baris</button><span class="field-help">Tambahkan warna lain untuk bahan ini.</span></div>
+</section>

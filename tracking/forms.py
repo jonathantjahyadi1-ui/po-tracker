@@ -17,11 +17,9 @@ class InvoiceForm(forms.Form):
     total_rp = forms.DecimalField(
         label='Total Rp', max_digits=16, decimal_places=2, min_value=0, initial=0
     )
-    catatan = forms.CharField(
-        label='Catatan', required=False, widget=forms.Textarea(attrs={'rows': 3})
-    )
     invoice_file = forms.FileField(
-        label='File invoice', required=False,
+        label='File invoice',
+        required=False,
         widget=forms.FileInput(attrs={'accept': '.pdf,.jpg,.jpeg,.png'}),
     )
 
@@ -48,11 +46,22 @@ class InvoiceForm(forms.Form):
 class PoForm(forms.ModelForm):
     class Meta:
         model = Po
-        fields = ['tgl_order', 'produk', 'pemakaian_std', 'catatan']
+        fields = ['tgl_order']
+        labels = {'tgl_order': 'Tanggal order'}
         widgets = {
             'tgl_order': forms.DateInput(attrs={'type': 'date'}),
-            'catatan': forms.Textarea(attrs={'rows': 3}),
         }
+
+
+class ReceiveForm(forms.Form):
+    tanggal = forms.DateField(
+        label='Tanggal terima bahan', widget=forms.DateInput(attrs={'type': 'date'})
+    )
+
+
+class AssignPoForm(forms.Form):
+    nomor_po = forms.CharField(label='Nomor PO', max_length=80)
+    produk = forms.CharField(label='Nama produk', max_length=160, required=False)
 
 
 class AccountForm(forms.Form):

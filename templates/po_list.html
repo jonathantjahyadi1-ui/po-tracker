@@ -1,16 +1,15 @@
-{% extends 'base.html' %}
+{% extends 'base.html' %}{% load tracker %}
 {% block content %}
-<div class="page-head"><h1>PO</h1></div>
-<nav class="tabs" aria-label="Filter PO">
-  <a href="?filter=belum" {% if filter == 'belum' %}aria-current="page"{% endif %}>Belum balance</a>
-  <a href="?filter=balance" {% if filter == 'balance' %}aria-current="page"{% endif %}>Balance</a>
-  <a href="?filter=selesai" {% if filter == 'selesai' %}aria-current="page"{% endif %}>Selesai</a>
-</nav>
-<section class="panel"><div class="table-wrap"><table><thead><tr><th>No. PO</th>
-  <th>Produk</th><th>Tanggal order</th><th>Status</th></tr></thead><tbody>
-  {% for po in pos %}<tr><td><a class="ref" href="{% url 'po_detail' po.pk %}">{{ po.nomor }}</a></td>
-  <td>{{ po.produk|default:"—" }}</td><td>{{ po.tgl_order|date:"d M Y"|default:"—" }}</td>
-  <td>{% if po.selesai %}Selesai{% elif po.balance %}Balance{% else %}Belum balance{% endif %}</td></tr>
-  {% empty %}<tr><td colspan="4" class="empty">Belum ada PO pada filter ini.</td></tr>{% endfor %}
-  </tbody></table></div></section>
+<div class="page-head"><div>{% if cmt %}<a class="back" href="{% url 'po_list' %}">PO</a><h1>PO · {{ cmt.name }}</h1><p>Hasil produksi dan sisa pengiriman untuk PO milik CMT ini.</p>{% elif legacy %}<a class="back" href="{% url 'po_list' %}">PO</a><h1>PO historis</h1><p>PO lama yang belum memiliki satu CMT terpetakan. Data tetap dapat dilihat.</p>{% else %}<h1>PO</h1><p>Pilih CMT untuk melihat daftar PO dan sisa kiriman barang jadi.</p>{% endif %}</div>{% if cmt %}<a class="button" href="{% url 'cmt_detail' cmt.pk %}">Lihat pengiriman bahan</a>{% endif %}</div>
+{% if cmt or legacy %}
+<form method="get" class="filters" role="search"><div class="field"><label for="po-query">Cari nomor PO / produk</label><input id="po-query" name="q" value="{{ q|default:'' }}" type="search" placeholder="Cari nomor PO atau nama produk…"></div><div class="field compact-field"><label for="po-status">Status</label><select id="po-status" name="filter"><option value="">Semua status</option>{% for value,label in status_choices %}<option value="{{ value }}" {% if filter == value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></div><button class="button primary" type="submit">Terapkan</button>{% if q or filter %}<a class="button" href="{% if cmt %}{% url 'po_cmt_list' cmt.pk %}{% else %}{% url 'po_legacy_list' %}{% endif %}">Hapus filter</a>{% endif %}</form>
+<section class="panel section-gap"><div class="table-wrap wide-table-wrap"><table><thead><tr><th>Nomor PO</th><th>Nama produk</th><th>Tanggal order</th><th>Tgl kirim gudang terakhir</th><th>Status</th><th class="num">Sisa kirim</th></tr></thead><tbody>
+{% for po in pos %}<tr><td><a class="ref" href="{% url 'po_detail' po.pk %}?back={{ request.get_full_path|urlencode }}">{{ po.nomor }}</a></td><td>{{ po.produk|default:"—" }}</td><td>{{ po.tgl_order|date:"d M Y"|default:"—" }}</td><td>{{ po.summary.last_shipment|date:"d M Y"|default:"—" }}</td><td>{% include 'partials/status.html' with item=po %}{% if po.summary.missing_results %}<small class="cell-note">Hasil {{ po.summary.missing_results|length }} warna belum diisi</small>{% endif %}</td><td class="num">{% if po.summary.code == 'belum_ada_hasil' %}—{% else %}{{ po.summary.remaining }} pcs{% endif %}{% if po.summary.over %}<small class="cell-note negative">Lebih {{ po.summary.over }} pcs</small>{% endif %}</td></tr>
+{% empty %}<tr><td colspan="6" class="empty">{% if q or filter %}<strong>Tidak ada PO yang cocok dengan filter ini.</strong><p>Ubah pencarian atau pilih Semua status.</p>{% else %}<strong>Belum ada PO{% if cmt %} untuk {{ cmt.name }}{% endif %}.</strong><p>Nomor PO diisi melalui CMT setelah bahan diterima.{% if cmt %} <a href="{% url 'cmt_detail' cmt.pk %}">Buka pengiriman bahan</a>.{% endif %}</p>{% endif %}</td></tr>{% endfor %}
+</tbody></table></div></section>
+{% if page_obj.has_other_pages %}<nav class="pagination" aria-label="Halaman PO">{% if page_obj.has_previous %}<a class="button small" href="?q={{ q|urlencode }}&amp;filter={{ filter|urlencode }}&amp;page={{ page_obj.previous_page_number }}">Sebelumnya</a>{% endif %}<span>Halaman {{ page_obj.number }} dari {{ page_obj.paginator.num_pages }}</span>{% if page_obj.has_next %}<a class="button small" href="?q={{ q|urlencode }}&amp;filter={{ filter|urlencode }}&amp;page={{ page_obj.next_page_number }}">Berikutnya</a>{% endif %}</nav>{% endif %}
+{% else %}
+<section class="panel"><div class="table-wrap"><table><thead><tr><th>CMT</th><th class="num">Jumlah PO</th><th class="num">PO kurang kirim</th><th></th></tr></thead><tbody>{% for cmt in cmts %}<tr><td><a class="ref" href="{% url 'po_cmt_list' cmt.pk %}">{{ cmt.name }}</a></td><td class="num">{{ cmt.po_count|default:0 }} PO</td><td class="num"><a href="{% url 'po_cmt_list' cmt.pk %}?filter=kurang_kirim">{{ cmt.shortage_count|default:0 }} PO</a></td><td><a href="{% url 'po_cmt_list' cmt.pk %}">Lihat PO</a></td></tr>{% empty %}<tr><td colspan="4" class="empty">Belum ada CMT. CMT yang sudah tercatat akan tampil di sini.</td></tr>{% endfor %}</tbody></table></div></section>
+{% if legacy_count %}<p class="help-callout section-gap">{{ legacy_count }} PO historis belum terpetakan ke satu CMT. <a href="{% url 'po_legacy_list' %}">Lihat PO historis</a>.</p>{% endif %}
+{% endif %}
 {% endblock %}

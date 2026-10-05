@@ -5,13 +5,16 @@ from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
 from django.utils import timezone
 
-from tracking.models import Hasil, Invoice, KirimGudang, Master, User
+from tracking.models import Invoice, Master, User
 from tracking.services import (
     ajukan_alokasi,
+    kirim_gudang,
     master,
-    pindah_status,
     putuskan_alokasi,
+    simpan_hasil,
     simpan_invoice,
+    tautkan_po,
+    terima_alokasi,
 )
 
 
@@ -39,7 +42,6 @@ class Command(BaseCommand):
                 'surat_jalan': 'SJ-CONTOH',
                 'tanggal': today - timedelta(days=30),
                 'total_rp': Decimal('15000000'),
-                'catatan': '',
             },
             [
                 {
@@ -51,18 +53,15 @@ class Command(BaseCommand):
             ],
             user,
         )
-        allocation = ajukan_alokasi(
-            list(invoice.roll_set.values_list('id', flat=True)), 'PO 109', cmt, user
-        )
-        putuskan_alokasi(allocation, 'acc', user)
+        allocation = ajukan_alokasi(list(invoice.roll_set.values_list('id', flat=True)), cmt, user)
+        putuskan_alokasi(allocation, 'acc', user, tgl_kirim=today - timedelta(days=20))
         ids = list(invoice.roll_set.values_list('id', flat=True))
-        pindah_status(ids, 'dikirim', user, tgl_kirim=today - timedelta(days=20))
-        pindah_status(ids, 'diterima', user, tgl_terima=today - timedelta(days=19))
-        pindah_status(ids, 'terpakai', user)
+        terima_alokasi(allocation, ids, today - timedelta(days=19), user)
+        po = tautkan_po(allocation, 'PO 109', user, produk='Kemeja contoh')
         color = Master.objects.get(kind='color', name='Cream')
-        Hasil.objects.create(po=allocation.po, color=color, pcs=1072)
+        simpan_hasil(po, color, 1072, user)
         for pcs in [430, 247, 250, 145]:
-            KirimGudang.objects.create(po=allocation.po, color=color, tanggal=today, pcs=pcs)
+            kirim_gudang(po, color, {'tanggal': today, 'pcs': pcs}, user)
         self.stdout.write(
             self.style.SUCCESS('Data contoh dibuat. Akun: contoh_purchasing / contoh123')
         )

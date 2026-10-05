@@ -1,0 +1,7 @@
+﻿<section class="color-row" data-color-row>
+  <div class="color-row-head"><h3>Baris warna <span data-row-number>{{ row_index|add:1 }}</span></h3><button class="link-button" type="button" data-remove-color>Hapus baris</button></div>
+  <div class="field-grid"><div class="field"><label for="group-{{ group_index }}-row-{{ row_index }}-color">Warna</label><input id="group-{{ group_index }}-row-{{ row_index }}-color" name="groups-{{ group_index }}-rows-{{ row_index }}-color" value="{{ row.color|default:'' }}" list="color-options" maxlength="160" data-color-input {% if not existing %}required{% endif %}></div>
+    <div class="field"><label for="group-{{ group_index }}-row-{{ row_index }}-lokasi">Lokasi / gudang <span class="optional">opsional</span></label><input id="group-{{ group_index }}-row-{{ row_index }}-lokasi" name="groups-{{ group_index }}-rows-{{ row_index }}-lokasi" value="{{ row.lokasi|default:'' }}" list="warehouse-options" maxlength="160" data-location-input></div></div>
+  {% for error in row.errors %}<p class="field-error">{{ error }}</p>{% endfor %}
+  {% include 'partials/yard.html' with row=row group_index=group_index row_index=row_index %}
+</section>

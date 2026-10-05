@@ -8,7 +8,7 @@
   <link rel="icon" href="{% static 'favicon.svg' %}" type="image/svg+xml">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="{% static 'app.css' %}">
   <script src="{% static 'app.js' %}" defer></script>
 </head>
@@ -29,9 +29,7 @@
     <a href="{% url 'po_list' %}" {% if active == 'po' %}aria-current="page"{% endif %}>PO</a>
     <a href="{% url 'master' %}" {% if active == 'master' %}aria-current="page"{% endif %}>Master</a>
     {% endif %}
-    {% if request.user.role == 'admin' or request.user.role == 'direktur' %}
     <a href="{% url 'history' %}" {% if active == 'history' %}aria-current="page"{% endif %}>Riwayat</a>
-    {% endif %}
     {% if request.user.role == 'admin' %}
     <a href="{% url 'accounts' %}" {% if active == 'accounts' %}aria-current="page"{% endif %}>Akun</a>
     {% endif %}

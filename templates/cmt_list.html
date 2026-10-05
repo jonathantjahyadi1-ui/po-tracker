@@ -1,16 +1,7 @@
-{% extends 'base.html' %}{% load tracker %}
+﻿{% extends 'base.html' %}{% load tracker %}
 {% block content %}
-<div class="page-head"><h1>CMT</h1></div>
-<section class="panel"><div class="table-wrap"><table><thead><tr><th>CMT</th>
-  <th class="num">Menunggu</th><th class="num">Siap kirim</th>
-  <th class="num">Di CMT</th><th class="num">PO balance</th>
-  <th class="num">PO belum balance</th></tr></thead><tbody>
-  {% for cmt in cmts %}<tr><td><a class="ref" href="{% url 'cmt_detail' cmt.pk %}">{{ cmt.name }}</a></td>
-    <td class="num">{{ cmt.counts.menunggu|default:0 }}</td>
-    <td class="num">{{ cmt.counts.siap_kirim|default:0 }}</td>
-    <td class="num">{{ cmt.at_cmt }}</td>
-    <td class="num">{{ cmt.balance_count }}</td>
-    <td class="num">{{ cmt.unbalanced_count }}</td></tr>
-  {% empty %}<tr><td colspan="6" class="empty">Belum ada CMT.</td></tr>{% endfor %}
-  </tbody></table></div></section>
+<div class="page-head"><div><h1>CMT</h1><p>Pilih CMT untuk mencatat penerimaan bahan dan mengisi nomor PO.</p></div></div>
+<section class="panel"><div class="table-wrap wide-table-wrap"><table><thead><tr><th>CMT</th><th class="num">Menunggu ACC</th><th class="num">Dikirim / belum diterima</th><th class="num">Roll di CMT</th><th class="num">Belum ada PO</th><th class="num">PO kurang kirim</th><th class="num">PO Done</th></tr></thead><tbody>
+{% for cmt in cmts %}<tr><td><a class="ref" href="{% url 'cmt_detail' cmt.pk %}">{{ cmt.name }}</a></td><td class="num">{{ cmt.counts.menunggu|default:0 }} roll</td><td class="num">{{ cmt.counts.dikirim|default:0 }} roll</td><td class="num">{{ cmt.at_cmt|default:0 }} roll</td><td class="num">{{ cmt.unassigned_count|default:0 }} pengiriman</td><td class="num">{{ cmt.shortage_count|default:0 }} PO</td><td class="num">{{ cmt.done_count|default:0 }} PO</td></tr>{% empty %}<tr><td colspan="7" class="empty">Belum ada CMT. CMT yang tercatat pada master akan tampil di sini.</td></tr>{% endfor %}
+</tbody></table></div></section>
 {% endblock %}

@@ -64,6 +64,9 @@ class Master(Dated):
 
 class Po(Dated):
     nomor = models.CharField(max_length=80, unique=True)
+    cmt = models.ForeignKey(
+        Master, on_delete=models.PROTECT, null=True, blank=True, related_name='purchase_orders'
+    )
     produk = models.CharField(max_length=160, blank=True)
     tgl_order = models.DateField(null=True, blank=True)
     pemakaian_std = models.DecimalField(max_digits=6, decimal_places=2, null=True, blank=True)
@@ -90,7 +93,8 @@ class Invoice(Dated):
 
     class Meta:
         constraints = [
-            models.UniqueConstraint('vendor', Lower('nomor'), name='invoice_vendor_nomor_ci')
+            models.UniqueConstraint('vendor', Lower('nomor'), name='invoice_vendor_nomor_ci'),
+            models.CheckConstraint(condition=Q(total_rp__gte=0), name='invoice_total_nonnegative'),
         ]
 
     def __str__(self):
@@ -103,6 +107,12 @@ class InvoiceAttachment(Dated):
     content_type = models.CharField(max_length=40)
     size = models.PositiveIntegerField()
     content = models.BinaryField()
+
+
+class InvoiceWrite(Dated):
+    invoice = models.ForeignKey(Invoice, on_delete=models.PROTECT, related_name='write_requests')
+    request_id = models.CharField(max_length=64, unique=True)
+    fingerprint = models.CharField(max_length=64)
 
 
 class InvoicePo(Dated):
@@ -125,6 +135,37 @@ class InvoicePo(Dated):
         ]
 
 
+class InvoiceMaterial(Dated):
+    invoice = models.ForeignKey(Invoice, on_delete=models.PROTECT, related_name='material_groups')
+    material = models.ForeignKey(Master, on_delete=models.PROTECT, related_name='+')
+    urut = models.PositiveSmallIntegerField()
+
+    class Meta:
+        ordering = ['urut', 'pk']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['invoice', 'urut'], name='invoice_material_urut_unique'
+            ),
+            models.CheckConstraint(condition=Q(urut__gte=1), name='invoice_material_urut_positive'),
+        ]
+
+
+class InvoiceColor(Dated):
+    group = models.ForeignKey(InvoiceMaterial, on_delete=models.PROTECT, related_name='color_rows')
+    color = models.ForeignKey(Master, on_delete=models.PROTECT, related_name='+')
+    lokasi = models.ForeignKey(
+        Master, on_delete=models.PROTECT, null=True, blank=True, related_name='+'
+    )
+    urut = models.PositiveIntegerField()
+
+    class Meta:
+        ordering = ['urut', 'pk']
+        constraints = [
+            models.UniqueConstraint(fields=['group', 'urut'], name='invoice_color_urut_unique'),
+            models.CheckConstraint(condition=Q(urut__gte=1), name='invoice_color_urut_positive'),
+        ]
+
+
 class Alokasi(Dated):
     class Status(models.TextChoices):
         MENUNGGU = 'menunggu', 'Menunggu'
@@ -132,7 +173,7 @@ class Alokasi(Dated):
         DITOLAK = 'ditolak', 'Ditolak'
         DIBATALKAN = 'dibatalkan', 'Dibatalkan'
 
-    po = models.ForeignKey(Po, on_delete=models.PROTECT)
+    po = models.ForeignKey(Po, on_delete=models.PROTECT, null=True, blank=True)
     cmt = models.ForeignKey(Master, on_delete=models.PROTECT)
     status = models.CharField(max_length=12, choices=Status.choices, default=Status.MENUNGGU)
     dibuat_oleh = models.ForeignKey(User, on_delete=models.PROTECT, related_name='alokasi_dibuat')
@@ -141,6 +182,8 @@ class Alokasi(Dated):
     )
     acc_pada = models.DateTimeField(null=True, blank=True)
     alasan = models.TextField(blank=True)
+    tgl_kirim = models.DateField(null=True, blank=True)
+    sj_kirim = models.CharField(max_length=80, blank=True)
 
 
 class Roll(Dated):
@@ -156,6 +199,9 @@ class Roll(Dated):
     invoice = models.ForeignKey(Invoice, on_delete=models.PROTECT)
     invoice_po = models.ForeignKey(
         InvoicePo, on_delete=models.PROTECT, null=True, blank=True, related_name='rolls'
+    )
+    invoice_color = models.ForeignKey(
+        InvoiceColor, on_delete=models.PROTECT, null=True, blank=True, related_name='rolls'
     )
     material = models.ForeignKey(Master, on_delete=models.PROTECT, related_name='+')
     color = models.ForeignKey(Master, on_delete=models.PROTECT, related_name='+')
@@ -185,6 +231,18 @@ class Roll(Dated):
         ]
 
 
+class AlokasiRoll(Dated):
+    """Preserve shipment membership after a rejected reservation releases its roll."""
+
+    alokasi = models.ForeignKey(Alokasi, on_delete=models.PROTECT, related_name='items')
+    roll = models.ForeignKey(Roll, on_delete=models.PROTECT, related_name='allocation_history')
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['alokasi', 'roll'], name='alokasi_roll_unique')
+        ]
+
+
 class Hasil(Dated):
     po = models.ForeignKey(Po, on_delete=models.PROTECT)
     color = models.ForeignKey(Master, on_delete=models.PROTECT)
@@ -204,6 +262,7 @@ class KirimGudang(Dated):
     )
     surat_jalan = models.CharField(max_length=80, blank=True)
     catatan = models.TextField(blank=True)
+    request_id = models.CharField(max_length=64, unique=True, null=True, blank=True)
 
     class Meta:
         constraints = [models.CheckConstraint(condition=Q(pcs__gt=0), name='kirim_pcs_positive')]

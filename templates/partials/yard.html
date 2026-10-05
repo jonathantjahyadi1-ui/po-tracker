@@ -1,32 +1,8 @@
-<div class="yard-layout">
-  <div>
-    <div class="yard-tools">
-      <button class="button small" type="button" data-paste-open>
-        Tempel dari Excel/WhatsApp
-      </button>
-      <label class="button small file-label">Impor yard (.csv/.xlsx)
-        <input type="file" name="{{ file_name }}" accept=".csv,.xlsx" data-file>
-      </label>
-      <button class="button small" type="button" data-clear-yards>Bersihkan</button>
-      <button class="button small" type="button" data-roll-detail-toggle
-        aria-expanded="false">Bedakan detail tiap roll</button>
-    </div>
-    <div class="paste-box" hidden>
-      <label>Daftar yard<textarea data-paste-text rows="5"></textarea></label>
-      <p data-paste-preview></p>
-      <button class="button small" type="button" data-apply-paste>Terapkan</button>
-    </div>
-    <p class="yard-label">Yard per roll</p>
-    <div class="yard-grid" data-yard-grid></div>
-    <textarea name="yards[]" rows="5" data-yard-source aria-label="Yard per roll"></textarea>
-    <input type="hidden" name="roll_details[]" data-roll-details>
-    <p class="field-error" data-yard-error></p>
-  </div>
-  <div class="yard-summary">
-    <div><span>Roll</span><strong data-roll-count>0</strong></div>
-    <div><span>Total yard</span><strong data-yard-total>0,00</strong></div>
-    <div><span>Rata-rata</span><strong data-yard-average>—</strong></div>
-    <div><span>Terkecil</span><strong data-yard-min>—</strong></div>
-    <div><span>Terbesar</span><strong data-yard-max>—</strong></div>
-  </div>
+﻿<div class="yard-layout">
+  <div><div class="yard-tools"><button class="button small" type="button" data-paste-open aria-expanded="false">Tempel daftar yard</button><label class="button small file-label">Impor CSV / XLSX<input type="file" name="file-{{ group_index }}-{{ row_index }}" accept=".csv,.xlsx" data-file aria-label="Impor yard baris warna"></label><button class="button small" type="button" data-clear-yards>Bersihkan yard</button></div>
+    <div class="paste-box" hidden><label>Daftar yard<textarea data-paste-text rows="4" placeholder="80; 82,5; 79"></textarea></label><p data-paste-preview aria-live="polite">0 roll · 0,00 yard</p><button class="button small" type="button" data-apply-paste>Terapkan daftar</button></div>
+    <label class="yard-label" for="group-{{ group_index }}-row-{{ row_index }}-yards">Yard per roll</label><p class="field-help yard-help">Satu nilai untuk satu roll. Desimal boleh memakai koma; pisahkan roll dengan Enter atau titik koma.</p>
+    <div class="yard-grid" data-yard-grid></div><textarea id="group-{{ group_index }}-row-{{ row_index }}-yards" name="groups-{{ group_index }}-rows-{{ row_index }}-yards" rows="4" data-yard-source>{{ row.yards_text|default:'' }}</textarea>
+    <p class="field-error" data-yard-error aria-live="polite"></p><p class="field-help" data-import-status aria-live="polite"></p>
+  </div><div class="yard-summary"><div><span>Jumlah roll</span><strong data-roll-count>0</strong></div><div><span>Total yard</span><strong data-yard-total>0,00</strong></div><div><span>Rata-rata yard</span><strong data-yard-average>—</strong></div><div><span>Yard terkecil</span><strong data-yard-min>—</strong></div><div><span>Yard terbesar</span><strong data-yard-max>—</strong></div></div>
 </div>

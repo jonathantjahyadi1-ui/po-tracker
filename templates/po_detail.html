@@ -1,110 +1,23 @@
 {% extends 'base.html' %}{% load tracker %}
 {% block content %}
-<div class="page-head"><div><a class="back" href="{% url 'po_list' %}">PO</a>
-  <h1>{{ po.nomor }}</h1><p>{% if po.selesai %}Selesai{% elif balance %}Balance{% else %}Belum balance{% endif %}</p></div>
-  <a class="button" href="{% url 'po_export' po.pk %}">Unduh Excel</a></div>
-<section class="panel"><div class="panel-head"><h2>Informasi PO</h2></div>
-  <div class="meta-line"><span>Tanggal masuk CMT: {{ tgl_masuk|date:"d M Y"|default:"—" }}</span>
-    <span>Bahan: {{ materials|default:"—" }}</span></div>
-  {% if request.user.role == 'purchasing' and not po.selesai %}
-  <form method="post" class="form-section" data-submit-form>{% csrf_token %}<input type="hidden" name="action" value="edit">
-    <div class="field-grid">{% for field in form %}
-      <div class="field {% if field.name == 'catatan' %}wide{% endif %}">
-        <label for="{{ field.id_for_label }}">{{ field.label }}</label>{{ field }}{{ field.errors }}
-      </div>{% endfor %}</div>
-    <div class="form-actions"><button class="button" type="submit">Simpan info PO</button></div>
-  </form>
-  {% else %}<div class="meta-line"><span>Tanggal order:
-    {{ po.tgl_order|date:"d M Y"|default:"—" }}</span><span>Produk: {{ po.produk|default:"—" }}</span>
-    <span>Pemakaian std: {{ po.pemakaian_std|default:"—" }}</span></div>{% endif %}
+<div class="page-head"><div><nav class="breadcrumbs" aria-label="Lokasi halaman"><a href="{% url 'po_list' %}">PO</a>{% if po.cmt_id %}<span aria-hidden="true">/</span><a href="{% url 'po_cmt_list' po.cmt_id %}">{{ po.cmt.name }}</a>{% endif %}<span aria-hidden="true">/</span><span>{{ po.nomor }}</span></nav><h1>{{ po.nomor }}</h1><p>{{ po.produk|default:"Nama produk belum diisi" }}{% if po.cmt_id %} · {{ po.cmt.name }}{% endif %} · {% include 'partials/status.html' with item=po %}</p></div><div class="row-actions">{% if back_url %}<a class="button" href="{{ back_url }}">Kembali</a>{% endif %}<a class="button" href="{% url 'po_export' po.pk %}">Unduh Excel</a></div></div>
+{% if detail_error %}<div class="form-error-summary" role="alert" tabindex="-1" data-error-summary><strong>PO belum diperbarui.</strong><p>{{ detail_error }}</p></div>{% endif %}
+{% if summary.missing_results %}<p class="help-callout section-gap">Hasil {{ summary.missing_results|length }} warna belum dicatat. Isi total hasil setiap warna agar status pengiriman lengkap.</p>{% endif %}
+{% if summary.over %}<p class="form-error-summary" role="status">Ada kelebihan kirim {{ summary.over }} pcs pada data tercatat. Periksa rincian per warna. Sisa warna lain tetap ditampilkan terpisah.</p>{% endif %}
+<section class="panel section-gap"><div class="panel-head"><h2>Informasi PO</h2></div><div class="meta-line"><span>CMT: {{ po.cmt.name|default:"Belum terpetakan" }}</span><span>Bahan: {{ materials|default:"—" }}</span><span>Tanggal masuk CMT: {{ tgl_masuk|date:"d M Y"|default:"—" }}</span></div>
+{% if request.user.role == 'purchasing' %}<form method="post" class="form-section order-form" data-submit-form>{% csrf_token %}<input type="hidden" name="action" value="edit"><div class="field"><label for="{{ form.tgl_order.id_for_label }}">Tanggal order <span class="optional">opsional</span></label>{{ form.tgl_order }}{{ form.tgl_order.errors }}</div><button class="button" type="submit">Simpan tanggal order</button></form>{% else %}<div class="panel-note">Tanggal order: {{ po.tgl_order|date:"d M Y"|default:"—" }}</div>{% endif %}
 </section>
-<section class="panel section-gap"><div class="table-wrap wide-table-wrap"><table class="po-summary-table"><thead><tr>
-  <th>Invoice</th><th>Surat jalan</th><th>Warna</th>
-  <th class="num">Roll</th><th class="num">Yard</th><th class="num">Hasil</th>
-  {% for date in dates %}<th class="num">{{ date|date:"d M Y" }}</th>{% endfor %}
-  <th class="num">DONE</th><th class="num">Pemakaian</th></tr></thead><tbody>
-  {% for row in rows %}<tr><td>{{ row.invoices }}</td><td>{{ row.surat_jalan|default:"—" }}</td>
-    <td>{{ row.color.name }}</td><td class="num">{{ row.rolls }}</td>
-    <td class="num">{{ row.yard|indo }}</td><td class="num">
-    {% if request.user.role == 'purchasing' and not po.selesai %}
-      <form method="post" class="inline-result" data-submit-form>{% csrf_token %}
-        <input type="hidden" name="action" value="hasil">
-        <input type="hidden" name="color" value="{{ row.color.pk }}">
-        <label class="sr-only" for="hasil-{{ row.color.pk }}">Hasil {{ row.color.name }}</label>
-        <input id="hasil-{{ row.color.pk }}" type="number" min="0" name="pcs" value="{{ row.hasil }}">
-        <button class="button small" type="submit">Simpan</button></form>
-    {% else %}{{ row.hasil }}{% endif %}</td>
-    {% for date in dates %}<td class="num">{{ row.sent|get:date|default:0 }}</td>{% endfor %}
-    <td class="num {% if row.done < 0 %}negative{% endif %}">
-      {% if row.done < 0 %}Kelebihan {{ row.done|stringformat:"+d"|slice:"1:" }} pcs
-      {% else %}{{ row.done }}{% endif %}</td>
-    <td class="num">{% if row.pemakaian %}{{ row.pemakaian|indo }}{% else %}—{% endif %}</td></tr>
-  {% empty %}<tr><td colspan="8" class="empty">Belum ada roll untuk PO ini.</td></tr>{% endfor %}
-  {% if rows %}<tr class="total-row"><td colspan="3">Total</td>
-    <td class="num">{{ totals.rolls }}</td><td class="num">{{ totals.yard|indo }}</td>
-    <td class="num">{{ totals.hasil }}</td>
-    {% for date in dates %}<td class="num">{{ totals.sent|get:date }}</td>{% endfor %}
-    <td class="num">{{ totals.done }}</td><td class="num">—</td></tr>{% endif %}
-  </tbody></table></div></section>
-{% if request.user.role == 'purchasing' and not po.selesai %}
-<section class="panel form-section section-gap"><h2>Catat pengiriman ke gudang</h2>
-  <form method="post" data-submit-form>{% csrf_token %}
-    <input type="hidden" name="action" value="kirim">
-    <div class="field-grid three">
-      <div class="field"><label for="ship-date">Tanggal</label>
-        <input id="ship-date" type="date" name="tanggal" required></div>
-      <div class="field"><label for="ship-color">Warna</label><select id="ship-color" name="color" required>
-        <option value="">Pilih warna</option>{% for color in colors %}
-        <option value="{{ color.pk }}">{{ color.name }}</option>{% endfor %}</select></div>
-      <div class="field"><label for="ship-pcs">Pcs</label>
-        <input id="ship-pcs" type="number" min="1" name="pcs" required></div>
-      <div class="field"><label for="ship-warehouse">Gudang</label>
-        <select id="ship-warehouse" name="gudang"><option value="">Pilih gudang</option>
-        {% for item in warehouses %}<option value="{{ item.pk }}">{{ item.name }}</option>{% endfor %}
-        </select></div>
-      <div class="field"><label for="ship-sj">Surat jalan</label>
-        <input id="ship-sj" name="surat_jalan"></div>
-      <div class="field"><label for="ship-note">Catatan</label>
-        <input id="ship-note" name="catatan"></div>
-    </div><div class="form-actions"><button class="button primary" type="submit">Simpan pengiriman</button></div>
-  </form>
-</section>
+<section class="panel section-gap"><div class="panel-head"><div><h2>Hasil produksi dan sisa kirim</h2><p>Hasil adalah total per warna. Angka baru mengganti total sebelumnya; kiriman gudang ditambahkan.</p></div></div><div class="production-totals"><div><span>Total hasil</span><strong>{{ summary.hasil|default:0 }} <small>pcs</small></strong></div><div><span>Total terkirim</span><strong>{{ summary.terkirim|default:0 }} <small>pcs</small></strong></div><div><span>Sisa kirim</span><strong>{{ summary.remaining|default:0 }} <small>pcs</small></strong></div><div><span>Status PO</span><strong class="summary-status">{{ summary.label }}</strong></div></div>
+<div class="table-wrap wide-table-wrap"><table class="po-summary-table"><thead><tr><th>Warna</th><th>Invoice sumber</th><th>Surat jalan invoice</th><th class="num">Roll</th><th class="num">Total yard alokasi</th><th class="num">Hasil produksi (pcs)</th><th class="num">Total terkirim (pcs)</th><th class="num">Sisa kirim (pcs)</th><th>Status</th><th class="num">Pemakaian (yard/pcs)</th></tr></thead><tbody>
+{% for row in rows %}<tr><td>{{ row.color.name }}</td><td>{{ row.invoices|default:"—" }}</td><td>{{ row.surat_jalan|default:"—" }}</td><td class="num">{{ row.rolls }}</td><td class="num">{{ row.yard|indo }}</td><td class="num">
+{% if request.user.role == 'purchasing' %}<form method="post" class="inline-result" data-submit-form>{% csrf_token %}<input type="hidden" name="action" value="hasil"><input type="hidden" name="color" value="{{ row.color.pk }}"><label class="sr-only" for="hasil-{{ row.color.pk }}">Total hasil {{ row.color.name }} dalam pcs</label><input id="hasil-{{ row.color.pk }}" type="number" min="{{ row.shipped }}" name="pcs" value="{{ row.input_hasil|default_if_none:'' }}" required aria-describedby="hasil-help" placeholder="Belum diisi"><button class="button small" type="submit">Simpan</button></form>{% elif row.has_result %}{{ row.hasil }}{% else %}<span class="muted">Belum diisi</span>{% endif %}</td>
+<td class="num">{{ row.shipped }}</td><td class="num">{% if row.has_result %}{{ row.remaining }}{% else %}—{% endif %}</td><td>{% include 'partials/status.html' with item=row %}{% if row.over %}<small class="cell-note negative">Lebih kirim {{ row.over }} pcs</small>{% elif row.remaining %}<small class="cell-note">{{ row.remaining }} pcs belum dikirim</small>{% endif %}</td><td class="num">{% if row.pemakaian != None %}{{ row.pemakaian|indo }}{% else %}—{% endif %}</td></tr>
+{% empty %}<tr><td colspan="10" class="empty">Belum ada bahan terkait PO ini. Periksa pengiriman pada CMT.</td></tr>{% endfor %}
+</tbody></table></div><div class="panel-note"><p class="field-help" id="hasil-help">Isi total hasil produksi untuk warna ini. Angka baru mengganti total sebelumnya. Hasil tidak boleh lebih kecil dari total kiriman tercatat.</p><p class="field-help">Pemakaian = total yard alokasi ÷ hasil produksi. Status Done dihitung dari hasil yang sudah dicatat dan seluruh kiriman per warna.</p></div></section>
+{% if request.user.role == 'purchasing' %}
+<section class="panel form-section section-gap" id="kiriman-gudang"><h2>Catat kiriman ke gudang</h2><form method="post" data-submit-form>{% csrf_token %}<input type="hidden" name="action" value="kirim"><input type="hidden" name="request_id" value="{{ request_id }}">
+<div class="field-grid three"><div class="field"><label for="ship-date">Tanggal kirim gudang</label><input id="ship-date" type="date" name="tanggal" value="{% if posted.action == 'kirim' %}{{ posted.tanggal }}{% endif %}" required></div><div class="field"><label for="ship-color">Warna</label><select id="ship-color" name="color" required aria-describedby="ship-context"><option value="">Pilih warna</option>{% for row in rows %}<option value="{{ row.color.pk }}" {% if posted.action == 'kirim' and posted.color == row.color.pk|stringformat:'s' %}selected{% endif %} data-hasil="{{ row.hasil|default_if_none:'' }}" data-shipped="{{ row.shipped }}" data-remaining="{{ row.remaining|default_if_none:'' }}">{{ row.color.name }}</option>{% endfor %}</select></div><div class="field"><label for="ship-pcs">Jumlah pcs</label><input id="ship-pcs" type="number" min="1" name="pcs" value="{% if posted.action == 'kirim' %}{{ posted.pcs }}{% endif %}" required></div>
+<div class="shipment-context wide" id="ship-context" aria-live="polite">Pilih warna untuk melihat hasil, total terkirim, dan sisa sebelum mencatat kiriman.</div><div class="field"><label for="ship-warehouse">Gudang <span class="optional">opsional</span></label><select id="ship-warehouse" name="gudang"><option value="">Pilih gudang</option>{% for item in warehouses %}<option value="{{ item.pk }}" {% if posted.action == 'kirim' and posted.gudang == item.pk|stringformat:'s' %}selected{% endif %}>{{ item.name }}</option>{% endfor %}</select></div><div class="field"><label for="ship-sj">Surat jalan gudang <span class="optional">opsional</span></label><input id="ship-sj" name="surat_jalan" value="{% if posted.action == 'kirim' %}{{ posted.surat_jalan }}{% endif %}"></div><div class="field"><label for="ship-note">Catatan kiriman <span class="optional">opsional</span></label><input id="ship-note" name="catatan" value="{% if posted.action == 'kirim' %}{{ posted.catatan }}{% endif %}"></div></div><div class="form-actions"><button class="button primary" type="submit">Simpan kiriman gudang</button></div></form></section>
 {% endif %}
-<section class="panel section-gap"><div class="panel-head"><h2>Roll PO</h2></div>
-  <form method="post" action="{% url 'roll_status' %}" data-submit-form>{% csrf_token %}
-    <div class="table-wrap wide-table-wrap"><table><thead><tr>
-      {% if request.user.role == 'purchasing' and not po.selesai %}
-      <th><input type="checkbox" id="select-all" aria-label="Pilih semua roll"></th>{% endif %}
-      <th>Invoice</th><th>Warna</th><th class="num">Roll</th><th class="num">Yard</th>
-      <th>Status</th><th>CMT</th><th>Tgl kirim</th><th>Tgl terima</th></tr></thead><tbody>
-      {% for roll in rolls %}<tr>
-      {% if request.user.role == 'purchasing' and not po.selesai %}
-      <td><input type="checkbox" name="roll" value="{{ roll.pk }}" aria-label="Pilih roll {{ roll.urut }}"></td>
-      {% endif %}
-      <td>{{ roll.invoice.nomor }}</td><td>{{ roll.color.name }}</td>
-      <td class="num">{{ roll.urut }}</td><td class="num">{{ roll.yard|indo }}</td>
-      <td>{% include 'partials/status.html' with item=roll %}</td>
-      <td>{{ roll.alokasi.cmt.name }}</td>
-      <td>{{ roll.tgl_kirim|date:"d M Y"|default:"—" }}</td>
-      <td>{{ roll.tgl_terima|date:"d M Y"|default:"—" }}</td></tr>{% endfor %}
-      </tbody></table></div>
-    {% if request.user.role == 'purchasing' and not po.selesai %}
-    <div class="roll-actions"><div class="field"><label for="roll-date">Tanggal terima</label>
-      <input id="roll-date" type="date" name="tanggal"></div>
-      <div class="field"><label for="roll-reason">Alasan / catatan</label>
-      <input id="roll-reason" name="alasan"></div>
-      <div class="row-actions"><button class="button" name="action" value="terima">Terima CMT</button>
-        <button class="button" name="action" value="terpakai">Tandai terpakai</button>
-        <button class="button" name="action" value="rusak">Tandai rusak</button>
-        <button class="button" name="action" value="kembali">Kembalikan ke stok</button>
-        <button class="button" name="action" value="batal_kirim">Batalkan pengiriman</button>
-        <button class="button" name="action" value="koreksi">Koreksi</button></div></div>
-    {% endif %}
-  </form>
-</section>
-{% if request.user.role == 'purchasing' and not po.selesai %}
-<form method="post" class="section-gap" data-submit-form>{% csrf_token %}
-  <button class="button" name="action" value="selesai" type="submit"
-    {% if not balance %}disabled{% endif %}>Tandai PO selesai</button>
-</form>{% endif %}
+<section class="panel section-gap"><div class="panel-head"><div><h2>Riwayat kiriman gudang</h2><p>Setiap baris adalah satu transaksi kiriman; jumlahnya masuk ke Total terkirim.</p></div></div><div class="table-wrap"><table><thead><tr><th>Tanggal kirim gudang</th><th>Warna</th><th class="num">Jumlah pcs</th><th>Gudang</th><th>Surat jalan gudang</th><th>Catatan kiriman</th></tr></thead><tbody>{% for shipment in shipments %}<tr><td>{{ shipment.tanggal|date:"d M Y" }}</td><td>{{ shipment.color.name }}</td><td class="num">{{ shipment.pcs }} pcs</td><td>{{ shipment.gudang.name|default:"—" }}</td><td>{{ shipment.surat_jalan|default:"—" }}</td><td>{{ shipment.catatan|default:"—" }}</td></tr>{% empty %}<tr><td colspan="6" class="empty">Belum ada kiriman gudang yang dicatat.</td></tr>{% endfor %}</tbody></table></div></section>
 {% endblock %}

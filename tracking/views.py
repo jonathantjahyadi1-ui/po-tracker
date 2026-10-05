@@ -1,43 +1,58 @@
+import json
+import re
 from collections import defaultdict
 from datetime import date
 from functools import wraps
 from hashlib import sha256
 from io import BytesIO
-import json
+from uuid import uuid4
+from zipfile import BadZipFile
 
 from django.contrib import messages
 from django.contrib.auth import login, logout
 from django.core.cache import cache
 from django.core.exceptions import PermissionDenied, ValidationError
+from django.core.paginator import Paginator
 from django.db import transaction
 from django.db.models import Count, Max, Prefetch, Q, Sum
-from django.http import HttpResponse, HttpResponseNotAllowed
+from django.http import HttpResponse, HttpResponseNotAllowed, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
-from django.utils.http import content_disposition_header
+from django.utils import timezone
+from django.utils.http import content_disposition_header, url_has_allowed_host_and_scheme
 from openpyxl import Workbook
+from openpyxl.utils.exceptions import InvalidFileException
 
-from .forms import AccountForm, InvoiceForm, LoginForm, PoForm
+from .forms import AccountForm, AssignPoForm, InvoiceForm, LoginForm, PoForm, ReceiveForm
 from .models import (
-    Alokasi, Hasil, Invoice, InvoiceAttachment, InvoicePo, KirimGudang, Log, Master,
-    Po, Roll, User, normalize_po,
+    Alokasi,
+    Invoice,
+    InvoiceAttachment,
+    KirimGudang,
+    Log,
+    Master,
+    Po,
+    Roll,
+    User,
 )
-from .parsers import import_yards, parse_yards, suspicious_yards
+from .parsers import import_yards, parse_yards
 from .services import (
     ajukan_alokasi,
     batalkan_invoice,
-    hitung_done,
     hitung_pemakaian,
+    kirim_alokasi_legacy,
     kirim_gudang,
     log,
     pindah_status,
-    po_balance,
+    po_rolls,
+    po_status,
+    po_status_many,
     putuskan_alokasi,
     roll_count,
-    selesaikan_po,
     simpan_hasil,
     simpan_invoice,
-    ubah_po_invoice,
-    ubah_roll_invoice,
+    tautkan_po,
+    terima_alokasi,
+    ubah_produk_po,
     yard_total,
 )
 
@@ -80,6 +95,29 @@ def input_pcs(value):
         raise ValidationError('Jumlah pcs harus berupa angka bulat.')
 
 
+def safe_back(request, fallback):
+    value = request.POST.get('back') or request.GET.get('back') or fallback
+    if (
+        value.startswith('/')
+        and not value.startswith('//')
+        and url_has_allowed_host_and_scheme(
+            value, allowed_hosts={request.get_host()}, require_https=request.is_secure()
+        )
+    ):
+        return value
+    return fallback
+
+
+def allocation_display(allocation, rolls):
+    """Make unsent legacy approval explicit rather than infer a fabric shipment."""
+    if allocation.status == 'disetujui' and any(roll.status == 'siap_kirim' for roll in rolls):
+        partly_sent = any(roll.tgl_kirim for roll in rolls)
+        allocation.status_key = 'dikirim' if partly_sent else 'siap_kirim'
+        allocation.status_label = (
+            'Dikirim sebagian (data lama)' if partly_sent else 'Siap kirim (data lama)'
+        )
+
+
 def health(request):
     return HttpResponse('ok', content_type='text/plain')
 
@@ -112,28 +150,10 @@ def sign_out(request):
 
 
 def balance_flags(pos):
-    ids = [po.pk for po in pos]
-    hasil = defaultdict(dict)
-    kirim = defaultdict(dict)
-    colors = defaultdict(set)
-    for row in (
-        Roll.objects.filter(alokasi__po_id__in=ids).values('alokasi__po_id', 'color_id').distinct()
-    ):
-        colors[row['alokasi__po_id']].add(row['color_id'])
-    for row in Hasil.objects.filter(po_id__in=ids).values('po_id', 'color_id', 'pcs'):
-        hasil[row['po_id']][row['color_id']] = row['pcs']
-    for row in (
-        KirimGudang.objects.filter(po_id__in=ids)
-        .values('po_id', 'color_id')
-        .annotate(total=Sum('pcs'))
-    ):
-        kirim[row['po_id']][row['color_id']] = row['total']
+    summaries = po_status_many(pos)
     for po in pos:
-        po.balance = (
-            bool(hasil[po.pk])
-            and colors[po.pk] == set(hasil[po.pk])
-            and all(pcs == kirim[po.pk].get(color, 0) for color, pcs in hasil[po.pk].items())
-        )
+        po.summary = summaries[po.pk]
+        po.balance = po.summary['is_done']
     return pos
 
 
@@ -147,8 +167,8 @@ def dashboard(request):
         .select_related('po', 'cmt')
         .annotate(rolls=Count('roll'))
     )
-    ready = Roll.objects.filter(status='siap_kirim').count()
-    pos = balance_flags(list(Po.objects.filter(selesai=False).order_by('-id')))
+    pos = balance_flags(list(Po.objects.select_related('cmt').order_by('-id')))
+    unbalanced = [po for po in pos if po.summary['code'] == 'kurang_kirim']
     return render(
         request,
         'dashboard.html',
@@ -158,10 +178,14 @@ def dashboard(request):
             'stock': stock,
             'waiting_count': len(waiting),
             'waiting_rolls': sum(a.rolls for a in waiting),
-            'ready': ready,
-            'unbalanced_count': sum(not po.balance for po in pos),
+            'shipped_count': Roll.objects.filter(status='dikirim').count(),
+            'without_po_count': Alokasi.objects.filter(status='disetujui', po__isnull=True).count(),
+            'legacy_ready_count': Roll.objects.filter(status='siap_kirim').count(),
+            'unbalanced_count': len(unbalanced),
             'waiting': waiting[:5],
-            'unbalanced': [po for po in pos if not po.balance][:5],
+            'unbalanced': unbalanced[:5],
+            'remaining_pcs': sum(po.summary['remaining'] for po in pos),
+            'incomplete_count': sum(bool(po.summary['missing_results']) for po in pos),
         },
     )
 
@@ -250,16 +274,20 @@ def vendor_list(request):
 @access('purchasing', 'direktur')
 def vendor_detail(request, pk):
     vendor = get_object_or_404(Master, pk=pk, kind='vendor')
-    invoices = list(
-        Invoice.objects.filter(vendor=vendor, dibatalkan=False)
-        .order_by('-tanggal', '-id')
-        .prefetch_related(
+    q = request.GET.get('q', '').strip()
+    queryset = Invoice.objects.filter(vendor=vendor, dibatalkan=False)
+    if q:
+        queryset = queryset.filter(nomor__icontains=q)
+    page_obj = Paginator(
+        queryset.order_by('-tanggal', '-id').prefetch_related(
             Prefetch(
                 'roll_set',
                 queryset=Roll.objects.select_related('material', 'color', 'alokasi__cmt'),
             )
-        )
-    )
+        ),
+        20,
+    ).get_page(request.GET.get('page'))
+    invoices = list(page_obj.object_list)
     grouped_yards = {
         (row['invoice_id'], row['material_id'], row['color_id']): row['yard']
         for row in Roll.objects.filter(invoice_id__in=[item.pk for item in invoices])
@@ -285,9 +313,9 @@ def vendor_detail(request, pk):
             row['rolls'] += 1
             if roll.status == 'tersedia':
                 row['available'] += 1
-            elif roll.status in ('menunggu', 'siap_kirim'):
+            elif roll.status in ('menunggu', 'siap_kirim') and roll.alokasi_id:
                 row['pending'][roll.alokasi.cmt.name] += 1
-            elif roll.tgl_kirim:
+            elif roll.tgl_kirim and roll.alokasi_id:
                 row['sent'][roll.tgl_kirim][roll.alokasi.cmt.name] += 1
         invoice.rows = list(groups.values())
         for row in invoice.rows:
@@ -296,6 +324,7 @@ def vendor_detail(request, pk):
             row['sent'] = {date: dict(counts) for date, counts in row['sent'].items()}
         invoice.dates = sorted({date for row in invoice.rows for date in row['sent']})
         invoice.yards = sum((row['yard'] for row in invoice.rows), 0)
+        invoice.roll_count = sum(row['rolls'] for row in invoice.rows)
     return render(
         request,
         'vendor_detail.html',
@@ -304,98 +333,235 @@ def vendor_detail(request, pk):
             'active': 'vendor',
             'vendor': vendor,
             'invoices': invoices,
+            'q': q,
+            'invoice_count': page_obj.paginator.count,
+            'page_obj': page_obj,
+            'back': request.get_full_path(),
         },
     )
 
 
-def posted_groups(request):
-    po_numbers = request.POST.getlist('po[]')
-    names = request.POST.getlist('material[]')
-    colors = request.POST.getlist('color[]')
-    locations = request.POST.getlist('lokasi[]')
-    notes = request.POST.getlist('catatan[]')
-    texts = request.POST.getlist('yards[]')
-    detail_texts = request.POST.getlist('roll_details[]')
-    groups = []
-    seen_po = set()
-    for index, name in enumerate(names):
-        text = texts[index] if index < len(texts) else ''
-        upload = request.FILES.get(f'file-{index}')
-        po_number = normalize_po(po_numbers[index]) if index < len(po_numbers) else ''
-        if not name.strip() and not text.strip() and not upload and not po_number:
-            continue
-        yards, errors = parse_yards(text)
-        if errors:
-            raise ValidationError(errors)
-        text_yard_count = len(yards)
-        details = []
-        if index < len(detail_texts) and detail_texts[index]:
-            try:
-                details = json.loads(detail_texts[index])
-            except (TypeError, ValueError):
-                raise ValidationError(f'PO {index + 1}: detail roll tidak valid.')
-            if not isinstance(details, list) or len(details) != text_yard_count:
-                raise ValidationError(f'PO {index + 1}: jumlah detail roll tidak sesuai yard.')
-        if upload:
-            imported, file_errors = import_yards(upload)
-            yards.extend(imported)
-            errors.extend(file_errors)
-        if errors:
-            raise ValidationError(errors)
-        if not name.strip() or index >= len(colors) or not colors[index].strip():
-            raise ValidationError(f'PO {index + 1}: bahan dan warna wajib diisi.')
-        if not yards:
-            raise ValidationError(f'PO {index + 1}: masukkan yard per roll.')
-        if len(groups) >= 10:
-            raise ValidationError('Satu invoice maksimal berisi 10 grup PO.')
-        if po_number:
-            if len(po_number) > 80:
-                raise ValidationError(f'PO {index + 1}: nomor PO maksimal 80 karakter.')
-            if po_number in seen_po:
-                raise ValidationError(f'{po_number} sudah ada dalam invoice ini.')
-            seen_po.add(po_number)
-        rolls = []
-        for at, yard in enumerate(yards):
-            detail = details[at] if at < len(details) else {}
-            if not isinstance(detail, dict):
-                raise ValidationError(f'PO {index + 1}: detail roll {at + 1} tidak valid.')
-            values = {}
-            for key, default in (
-                ('material', name),
-                ('color', colors[index]),
-                ('lokasi', locations[index] if index < len(locations) else ''),
-            ):
-                override = detail.get(key, '')
-                if not isinstance(override, str) or len(override) > 160:
-                    raise ValidationError(f'PO {index + 1}: {key} roll {at + 1} tidak valid.')
-                values[key] = override.strip() or default
-            rolls.append({'yard': yard, **values})
-        groups.append(
+def draft_groups(request, process_details=True):
+    """Retain every entered value, including invalid rows, for server validation."""
+    if 'group_count' in request.POST or any(
+        re.fullmatch(r'groups-\d+-material', key) for key in request.POST
+    ):
+        indices = sorted(
             {
-                'po_number': po_number,
-                'material': name,
-                'color': colors[index],
-                'lokasi': locations[index] if index < len(locations) else '',
-                'catatan': notes[index] if index < len(notes) else '',
-                'yards': yards,
-                'rolls': rolls,
-                'suspicious': suspicious_yards(yards),
+                int(match.group(1))
+                for key in request.POST
+                if (match := re.fullmatch(r'groups-(\d+)-material', key))
             }
         )
-    if not groups and not request.POST.get('existing'):
-        raise ValidationError('Tambahkan setidaknya satu PO.')
+        groups = []
+        for index in indices:
+            prefix = f'groups-{index}'
+            row_indices = sorted(
+                {
+                    int(match.group(1))
+                    for key in request.POST
+                    if (match := re.fullmatch(rf'{prefix}-rows-(\d+)-color', key))
+                }
+            )
+            rows = []
+            for row_index in row_indices:
+                key = f'{prefix}-rows-{row_index}'
+                rows.append(
+                    {
+                        'color': request.POST.get(f'{key}-color', ''),
+                        'lokasi': request.POST.get(f'{key}-lokasi', ''),
+                        'yards_text': request.POST.get(f'{key}-yards', ''),
+                        'upload': request.FILES.get(f'file-{index}-{row_index}'),
+                        'errors': [],
+                    }
+                )
+            groups.append(
+                {
+                    'material': request.POST.get(f'{prefix}-material', ''),
+                    'rows': rows,
+                    'errors': [],
+                }
+            )
+        return groups
+    # Existing callers may still submit the flat input format; PO input is ignored.
+    groups = []
+    for index, material in enumerate(request.POST.getlist('material[]')):
+
+        def value(name):
+            values = request.POST.getlist(f'{name}[]')
+            return values[index] if index < len(values) else ''
+
+        details_text = value('roll_details')
+        if details_text and process_details:
+            yards, parse_errors = parse_yards(value('yards'))
+            try:
+                details = json.loads(details_text)
+            except (ValueError, TypeError):
+                details = None
+            if not isinstance(details, list) or len(details) != len(yards):
+                raise ValidationError('Jumlah detail roll tidak sesuai daftar yard.')
+            if parse_errors:
+                raise ValidationError(parse_errors)
+            panels = {}
+            for at, yard in enumerate(yards):
+                detail = details[at]
+                if not isinstance(detail, dict) or any(
+                    not isinstance(detail.get(key, ''), str)
+                    for key in ('material', 'color', 'lokasi')
+                ):
+                    raise ValidationError(f'Detail roll {at + 1} tidak valid.')
+                actual_material = detail.get('material', '').strip() or material
+                actual_color = detail.get('color', '').strip() or value('color')
+                actual_location = detail.get('lokasi', '').strip() or value('lokasi')
+                panel = panels.setdefault(
+                    actual_material.casefold(),
+                    {
+                        'material': actual_material,
+                        'rows': {},
+                        'errors': [],
+                    },
+                )
+                row = panel['rows'].setdefault(
+                    (actual_color.casefold(), actual_location.casefold()),
+                    {
+                        'color': actual_color,
+                        'lokasi': actual_location,
+                        'yards_text': '',
+                        'errors': [],
+                    },
+                )
+                row['yards_text'] += f'{yard}\n'
+            for panel in panels.values():
+                panel['rows'] = list(panel['rows'].values())
+                groups.append(panel)
+            upload = request.FILES.get(f'file-{index}')
+            if upload:
+                groups.append(
+                    {
+                        'material': material,
+                        'rows': [
+                            {
+                                'color': value('color'),
+                                'lokasi': value('lokasi'),
+                                'yards_text': '',
+                                'upload': upload,
+                                'errors': [],
+                            }
+                        ],
+                        'errors': [],
+                    }
+                )
+            continue
+        groups.append(
+            {
+                'material': material,
+                'rows': [
+                    {
+                        'color': value('color'),
+                        'lokasi': value('lokasi'),
+                        'yards_text': value('yards'),
+                        'upload': request.FILES.get(f'file-{index}'),
+                        'errors': [],
+                    }
+                ],
+                'errors': [],
+            }
+        )
     return groups
 
 
-@access('purchasing', 'direktur')
+def posted_groups(request, drafts=None):
+    drafts = drafts if drafts is not None else draft_groups(request)
+    groups, errors = [], []
+    for index, draft in enumerate(drafts):
+        material = draft['material'].strip()
+        if not material and not any(
+            row['color'].strip() or row['yards_text'].strip() or row.get('upload')
+            for row in draft['rows']
+        ):
+            continue
+        if not material or len(material) > 160:
+            draft['errors'].append('Nama bahan wajib diisi, maksimal 160 karakter.')
+        if not draft['rows']:
+            draft['errors'].append('Tambahkan minimal satu baris warna.')
+        rows = []
+        for at, row in enumerate(draft['rows']):
+            color = row['color'].strip()
+            location = row['lokasi'].strip()
+            yards, row_errors = parse_yards(row['yards_text'])
+            if row.get('upload'):
+                try:
+                    if row['upload'].size > 10 * 1024 * 1024:
+                        raise ValueError('File yard maksimal 10 MB.')
+                    imported, file_errors = import_yards(row['upload'])
+                    yards.extend(imported)
+                    row_errors.extend(file_errors)
+                    # Uploaded values remain editable if another field fails validation.
+                    row['yards_text'] += '\n' + '\n'.join(str(yard) for yard in imported)
+                except (
+                    ValueError,
+                    UnicodeError,
+                    OSError,
+                    KeyError,
+                    BadZipFile,
+                    InvalidFileException,
+                ) as error:
+                    row_errors.append(f'File yard tidak dapat dibaca: {error}')
+            if not color or len(color) > 160:
+                row_errors.append('Warna wajib diisi, maksimal 160 karakter.')
+            if len(location) > 160:
+                row_errors.append('Lokasi maksimal 160 karakter.')
+            if not yards:
+                row_errors.append('Masukkan minimal satu yard per roll yang positif.')
+            row['errors'] = row_errors
+            errors.extend(f'Bahan {index + 1}, baris {at + 1}: {error}' for error in row_errors)
+            rows.append({'color': color, 'lokasi': location, 'yards': yards})
+        errors.extend(f'Bahan {index + 1}: {error}' for error in draft['errors'])
+        groups.append({'material': material, 'rows': rows})
+    if len(groups) > 10:
+        errors.append('Satu invoice maksimal berisi 10 panel bahan; baris warna tidak dibatasi 10.')
+    if not groups and not request.POST.get('existing'):
+        errors.append('Tambahkan minimal satu nama bahan beserta warna dan yard per roll.')
+    if errors:
+        raise ValidationError(errors)
+    return groups
+
+
+@access('purchasing')
+def invoice_yard_preview(request):
+    if request.method != 'POST':
+        return HttpResponseNotAllowed(['POST'])
+    upload = request.FILES.get('file')
+    if not upload:
+        return JsonResponse({'errors': ['Pilih file CSV atau XLSX.']}, status=400)
+    if upload.size > 10 * 1024 * 1024:
+        return JsonResponse({'errors': ['File yard maksimal 10 MB.']}, status=400)
+    try:
+        yards, errors = import_yards(upload)
+    except (ValueError, UnicodeError, OSError, KeyError, BadZipFile, InvalidFileException):
+        return JsonResponse(
+            {'errors': ['File yard tidak dapat dibaca. Periksa format file.']}, status=400
+        )
+    return JsonResponse(
+        {
+            'yards': [str(yard) for yard in yards],
+            'roll_count': len(yards),
+            'total_yard': str(sum(yards)),
+            'errors': errors,
+        },
+        status=400 if errors else 200,
+    )
+
+
+@access('purchasing')
 def invoice_edit(request, pk=None):
     invoice = get_object_or_404(Invoice, pk=pk) if pk else None
     form_error = False
     existing = (
         list(
-            invoice.roll_set.select_related('material', 'color', 'lokasi', 'invoice_po__po').order_by(
-                'material__name', 'color__name', 'urut'
-            )
+            invoice.roll_set.select_related(
+                'material', 'color', 'lokasi', 'invoice_po__po'
+            ).order_by('material__name', 'color__name', 'urut')
         )
         if invoice
         else []
@@ -412,36 +578,48 @@ def invoice_edit(request, pk=None):
     if invoice:
         initial['vendor'] = invoice.vendor.name
     form = InvoiceForm(request.POST or None, request.FILES or None, initial=initial)
+    draft_error = None
+    try:
+        input_groups = draft_groups(request) if request.method == 'POST' else []
+    except ValidationError as error:
+        input_groups = draft_groups(request, process_details=False)
+        draft_error = error
+    locked_metadata = any(roll.status != 'tersedia' or roll.alokasi_id for roll in existing)
+    if locked_metadata:
+        for key in ('nomor', 'tanggal'):
+            form.fields[key].widget.attrs['readonly'] = True
+    for roll in existing:
+        prefix = f'existing-{roll.pk}'
+        roll.edit_material = request.POST.get(f'{prefix}-material', roll.material.name)
+        roll.edit_color = request.POST.get(f'{prefix}-color', roll.color.name)
+        roll.edit_lokasi = request.POST.get(
+            f'{prefix}-lokasi', roll.lokasi.name if roll.lokasi_id else ''
+        )
+        roll.edit_yard = request.POST.get(prefix, str(roll.yard))
     if request.method == 'POST':
         write_only(request)
         try:
+            if draft_error:
+                raise draft_error
+            groups = posted_groups(request, input_groups)
             if not form.is_valid():
                 raise ValidationError('Periksa data invoice yang ditandai.')
-            groups = posted_groups(request)
             with transaction.atomic():
-                if invoice:
-                    ubah_po_invoice(invoice, request.POST, request.user)
-                    ubah_roll_invoice(invoice, request.POST, request.user)
-                saved = simpan_invoice(form.cleaned_data, groups, request.user, invoice)
+                invoice_data = {
+                    **form.cleaned_data,
+                    'request_id': request.POST.get('request_id') or None,
+                    'existing_roll_input': {
+                        key: value
+                        for key, value in request.POST.items()
+                        if key.startswith('existing-')
+                    },
+                }
+                saved = simpan_invoice(invoice_data, groups, request.user, invoice)
             messages.success(request, 'Invoice tersimpan.')
             return redirect('invoice_detail', pk=saved.pk)
         except ValidationError as error:
             flash_error(request, error)
             form_error = True
-    po_groups = list(
-        invoice.po_groups.select_related('po').annotate(
-            roll_count=Count('rolls', distinct=True),
-            allocated_count=Count(
-                'rolls', filter=~Q(rolls__status='tersedia'), distinct=True
-            ),
-        )
-    ) if invoice else []
-    for group in po_groups:
-        group.field_name = f'existing-po-{group.pk}'
-        group.form_value = (
-            request.POST.get(group.field_name, group.po.nomor if group.po_id else '')
-            if form_error else (group.po.nomor if group.po_id else '')
-        )
     return render(
         request,
         'invoice_form.html',
@@ -452,16 +630,19 @@ def invoice_edit(request, pk=None):
             'invoice': invoice,
             'attachment': (
                 InvoiceAttachment.objects.filter(invoice=invoice).defer('content').first()
-                if invoice else None
+                if invoice
+                else None
             ),
             'existing': existing,
-            'po_groups': po_groups,
+            'input_groups': input_groups,
             'vendors': Master.objects.filter(kind='vendor', active=True),
             'materials': Master.objects.filter(kind='material', active=True),
             'colors': Master.objects.filter(kind='color', active=True),
             'warehouses': Master.objects.filter(kind='warehouse', active=True),
-            'pos': Po.objects.order_by('nomor'),
             'form_error': form_error,
+            'locked_metadata': locked_metadata,
+            'existing_material_count': invoice.material_groups.count() if invoice else 0,
+            'request_id': request.POST.get('request_id') or uuid4().hex,
         },
     )
 
@@ -483,12 +664,13 @@ def invoice_detail(request, pk):
             'active': 'vendor',
             'invoice': invoice,
             'attachment': attachment,
-            'po_group_count': invoice.po_groups.count(),
+            'material_count': len({roll.material_id for roll in rolls}),
             'rolls': rolls,
             'roll_count': roll_count(invoice.roll_set.all()),
             'yard_total': yard_total(invoice.roll_set.all()),
             'cmts': Master.objects.filter(kind='cmt', active=True),
-            'pos': Po.objects.all(),
+            'back': safe_back(request, f'/vendor/{invoice.vendor_id}/'),
+            'back_url': safe_back(request, f'/vendor/{invoice.vendor_id}/'),
         },
     )
 
@@ -525,14 +707,14 @@ def allocation_create(request):
     write_only(request)
     try:
         cmt = get_object_or_404(Master, pk=request.POST.get('cmt'), kind='cmt')
-        allocation = ajukan_alokasi(
-            request.POST.getlist('roll'), request.POST.get('po', ''), cmt, request.user
+        allocation = ajukan_alokasi(request.POST.getlist('roll'), cmt, request.user)
+        messages.success(
+            request, f'{allocation.roll_set.count()} roll berhasil diajukan ke {cmt.name}.'
         )
-        messages.success(request, 'Alokasi diajukan.')
         return redirect('allocation_detail', pk=allocation.pk)
     except (ValidationError, ValueError) as error:
         messages.error(request, str(error))
-        return redirect(request.META.get('HTTP_REFERER', '/alokasi/'))
+        return redirect(safe_back(request, '/alokasi/'))
 
 
 @access('purchasing', 'direktur')
@@ -540,11 +722,21 @@ def allocation_list(request):
     status = request.GET.get('status', '')
     rows = (
         Alokasi.objects.select_related('po', 'cmt')
-        .annotate(roll_count=Count('roll'))
+        .prefetch_related('items__roll__invoice__vendor')
+        .annotate(roll_count=Count('items'), yard_total=Sum('items__roll__yard'))
         .order_by('-id')
     )
     if status in Alokasi.Status.values:
         rows = rows.filter(status=status)
+    page_obj = Paginator(rows, 30).get_page(request.GET.get('page'))
+    rows = list(page_obj.object_list)
+    for row in rows:
+        source_rolls = [item.roll for item in row.items.all()]
+        allocation_display(row, source_rolls)
+        row.invoice_labels = ', '.join(dict.fromkeys(roll.invoice.nomor for roll in source_rolls))
+        row.vendor_labels = ', '.join(
+            dict.fromkeys(roll.invoice.vendor.name for roll in source_rolls)
+        )
     return render(
         request,
         'allocation_list.html',
@@ -554,6 +746,7 @@ def allocation_list(request):
             'rows': rows,
             'status': status,
             'statuses': Alokasi.Status.choices,
+            'page_obj': page_obj,
         },
     )
 
@@ -566,17 +759,23 @@ def allocation_detail(request, pk):
         action = request.POST.get('action', '')
         try:
             if action in ('acc', 'tolak', 'batalkan'):
-                putuskan_alokasi(allocation, action, request.user, request.POST.get('alasan', ''))
-            elif action in ('kirim', 'terima'):
+                putuskan_alokasi(
+                    allocation,
+                    action,
+                    request.user,
+                    request.POST.get('alasan', ''),
+                    tgl_kirim=input_date(request.POST.get('tanggal')) if action == 'acc' else None,
+                    sj_kirim=request.POST.get('surat_jalan', ''),
+                )
+            elif action == 'kirim':
                 ids = request.POST.getlist('roll')
                 tanggal = input_date(request.POST.get('tanggal'))
-                fields = {'tgl_kirim': tanggal, 'sj_kirim': request.POST.get('surat_jalan', '')}
-                if action == 'terima':
-                    fields = {'tgl_terima': tanggal}
-                if Roll.objects.filter(pk__in=ids).exclude(alokasi=allocation).exists():
-                    raise ValidationError('Roll tidak termasuk alokasi ini.')
-                pindah_status(
-                    ids, 'dikirim' if action == 'kirim' else 'diterima', request.user, **fields
+                kirim_alokasi_legacy(
+                    allocation,
+                    ids,
+                    tanggal,
+                    request.user,
+                    sj_kirim=request.POST.get('surat_jalan', ''),
                 )
             else:
                 raise ValidationError('Aksi tidak dikenal.')
@@ -584,9 +783,13 @@ def allocation_detail(request, pk):
         except ValidationError as error:
             flash_error(request, error)
         return redirect('allocation_detail', pk=pk)
-    rolls = allocation.roll_set.select_related('invoice', 'material', 'color').order_by(
-        'invoice_id', 'material__name', 'color__name', 'urut'
-    )
+    rolls = [
+        item.roll
+        for item in allocation.items.select_related(
+            'roll__invoice__vendor', 'roll__material', 'roll__color'
+        ).order_by('roll__invoice_id', 'roll__material__name', 'roll__color__name', 'roll__urut')
+    ]
+    allocation_display(allocation, rolls)
     return render(
         request,
         'allocation_detail.html',
@@ -595,6 +798,16 @@ def allocation_detail(request, pk):
             'active': 'allocation',
             'allocation': allocation,
             'rolls': rolls,
+            'roll_count': len(rolls),
+            'yard_total': sum((roll.yard for roll in rolls), 0),
+            'today': timezone.localdate(),
+            'legacy_ready': any(roll.status == 'siap_kirim' for roll in rolls),
+            'has_legacy_ready': any(roll.status == 'siap_kirim' for roll in rolls),
+            'can_cancel': allocation.status in ('menunggu', 'disetujui')
+            and not allocation.po_id
+            and bool(rolls)
+            and all(roll.status in ('menunggu', 'siap_kirim') for roll in rolls),
+            'default_ship_date': timezone.localdate().isoformat(),
         },
     )
 
@@ -610,15 +823,27 @@ def cmt_list(request):
     counts = defaultdict(dict)
     for row in status_counts:
         counts[row['alokasi__cmt_id']][row['status']] = row['total']
-    po_links = Alokasi.objects.filter(roll__isnull=False).values_list('cmt_id', 'po_id').distinct()
-    po_status = {po.pk: po.balance for po in balance_flags(list(Po.objects.all()))}
     po_counts = defaultdict(lambda: [0, 0])
-    for cmt_id, po_id in po_links:
-        po_counts[cmt_id][0 if po_status[po_id] else 1] += 1
+    shortage_counts = defaultdict(int)
+    for po in balance_flags(list(Po.objects.filter(cmt__isnull=False))):
+        po_counts[po.cmt_id][0 if po.balance else 1] += 1
+        shortage_counts[po.cmt_id] += po.summary['code'] == 'kurang_kirim'
+    unassigned_counts = dict(
+        Alokasi.objects.filter(status='disetujui', po__isnull=True)
+        .values('cmt_id')
+        .annotate(total=Count('pk'))
+        .values_list('cmt_id', 'total')
+    )
     for cmt in cmts:
         cmt.counts = counts[cmt.pk]
-        cmt.at_cmt = sum(counts[cmt.pk].get(status, 0) for status in ('dikirim', 'diterima'))
+        cmt.at_cmt = sum(
+            counts[cmt.pk].get(status, 0) for status in ('diterima', 'terpakai', 'rusak')
+        )
         cmt.balance_count, cmt.unbalanced_count = po_counts[cmt.pk]
+        cmt.po_count = sum(po_counts[cmt.pk])
+        cmt.shortage_count = shortage_counts[cmt.pk]
+        cmt.done_count = cmt.balance_count
+        cmt.unassigned_count = unassigned_counts.get(cmt.pk, 0)
     return render(
         request,
         'cmt_list.html',
@@ -633,19 +858,130 @@ def cmt_list(request):
 @access('purchasing', 'direktur')
 def cmt_detail(request, pk):
     cmt = get_object_or_404(Master, pk=pk, kind='cmt')
-    allocations = (
+    cmt_error = None
+    posted = request.POST if request.method == 'POST' else {}
+    if request.method == 'POST':
+        write_only(request)
+        action = request.POST.get('action', '')
+        try:
+            allocation_id = request.POST.get('allocation', '')
+            if not allocation_id.isdigit():
+                raise ValidationError('Pilih pengiriman bahan yang ingin diperbarui.')
+            allocation = get_object_or_404(Alokasi, pk=allocation_id, cmt=cmt)
+            if action == 'receive':
+                receive_form = ReceiveForm(request.POST)
+                if not receive_form.is_valid():
+                    raise ValidationError('Tanggal terima bahan wajib diisi dengan benar.')
+                terima_alokasi(
+                    allocation,
+                    request.POST.getlist('rolls') or request.POST.getlist('roll'),
+                    receive_form.cleaned_data['tanggal'],
+                    request.user,
+                )
+                messages.success(request, 'Penerimaan bahan tercatat.')
+            elif action == 'assign_po':
+                assign_form = AssignPoForm(request.POST)
+                if not assign_form.is_valid():
+                    raise ValidationError(
+                        [
+                            f'{assign_form.fields[key].label}: {error}'
+                            for key, errors in assign_form.errors.items()
+                            for error in errors
+                        ]
+                    )
+                assigned_po = tautkan_po(
+                    allocation,
+                    assign_form.cleaned_data['nomor_po'],
+                    request.user,
+                    produk=assign_form.cleaned_data['produk'],
+                )
+                messages.success(
+                    request, f'Nomor {assigned_po.nomor} terhubung ke pengiriman {allocation.pk}.'
+                )
+            elif action == 'product':
+                if not allocation.po_id:
+                    raise ValidationError('Isi nomor PO sebelum mengubah nama produk.')
+                ubah_produk_po(allocation.po, request.POST.get('produk', ''), request.user, cmt=cmt)
+                messages.success(request, 'Nama produk tersimpan.')
+            else:
+                raise ValidationError('Aksi CMT tidak dikenal.')
+            page_query = ''
+            for key in ('page', 'allocation'):
+                if request.GET.get(key, '').isdigit():
+                    page_query = f'?{key}={request.GET[key]}'
+                    break
+            return redirect(f'/cmt/{pk}/{page_query}#pengiriman-{allocation.pk}')
+        except ValidationError as error:
+            cmt_error = error.messages
+            flash_error(request, error)
+    allocation_queryset = (
         Alokasi.objects.filter(cmt=cmt)
         .select_related('po')
-        .annotate(roll_count=Count('roll'))
+        .prefetch_related(
+            'items__roll__invoice__vendor', 'items__roll__material', 'items__roll__color'
+        )
         .order_by('-id')
     )
-    pos = balance_flags(
-        list(
-            Po.objects.filter(
-                id__in=Alokasi.objects.filter(cmt=cmt, roll__isnull=False).values('po_id')
-            ).order_by('-id')
+    page_number = request.GET.get('page')
+    selected_allocation = request.GET.get('allocation', '')
+    if (
+        not page_number
+        and selected_allocation.isdigit()
+        and allocation_queryset.filter(pk=selected_allocation).exists()
+    ):
+        page_number = allocation_queryset.filter(pk__gt=selected_allocation).count() // 20 + 1
+    page_obj = Paginator(allocation_queryset, 20).get_page(page_number)
+    allocations = list(page_obj.object_list)
+    for allocation in allocations:
+        allocation.roll_list = [item.roll for item in allocation.items.all()]
+        allocation.roll_count = len(allocation.roll_list)
+        allocation.yard_total = sum((roll.yard for roll in allocation.roll_list), 0)
+        allocation.received_count = sum(
+            roll.status in ('diterima', 'terpakai', 'rusak') for roll in allocation.roll_list
         )
-    )
+        allocation.shipped_count = sum(roll.status == 'dikirim' for roll in allocation.roll_list)
+        allocation_display(allocation, allocation.roll_list)
+        allocation.last_send = max(
+            (roll.tgl_kirim for roll in allocation.roll_list if roll.tgl_kirim), default=None
+        )
+        allocation.receipt_label = (
+            (
+                'Diterima'
+                if allocation.roll_count and allocation.received_count == allocation.roll_count
+                else 'Diterima sebagian'
+                if allocation.received_count
+                else 'Dikirim'
+            )
+            if allocation.status == 'disetujui'
+            else allocation.get_status_display()
+        )
+        if getattr(allocation, 'status_label', None) and allocation.received_count == 0:
+            allocation.receipt_label = allocation.status_label
+        allocation.receipt_key = (
+            'diterima'
+            if allocation.received_count == allocation.roll_count and allocation.roll_count
+            else 'diterima_sebagian'
+            if allocation.received_count
+            else getattr(allocation, 'status_key', 'dikirim')
+        )
+        allocation.can_assign = (
+            allocation.status == 'disetujui'
+            and not allocation.po_id
+            and bool(allocation.roll_list)
+            and all(roll.status == 'diterima' for roll in allocation.roll_list)
+        )
+        allocation.material_labels = ', '.join(
+            dict.fromkeys(
+                f'{roll.material.name} / {roll.color.name}' for roll in allocation.roll_list
+            )
+        )
+        allocation.invoice_labels = ', '.join(
+            dict.fromkeys(roll.invoice.nomor for roll in allocation.roll_list)
+        )
+        allocation.vendor_labels = ', '.join(
+            dict.fromkeys(roll.invoice.vendor.name for roll in allocation.roll_list)
+        )
+    pos = balance_flags(list(Po.objects.filter(cmt=cmt).order_by('-id')))
     return render(
         request,
         'cmt_detail.html',
@@ -655,48 +991,92 @@ def cmt_detail(request, pk):
             'cmt': cmt,
             'allocations': allocations,
             'pos': pos,
+            'today': timezone.localdate(),
+            'cmt_error': cmt_error,
+            'posted': posted,
+            'selected_rolls': request.POST.getlist('rolls') if cmt_error else [],
+            'page_obj': page_obj,
         },
     )
 
 
 @access('purchasing', 'direktur')
 def po_list(request):
-    filter_value = request.GET.get('filter', 'belum')
-    pos = balance_flags(list(Po.objects.order_by('-id')))
-    if filter_value == 'selesai':
-        pos = [po for po in pos if po.selesai]
-    elif filter_value == 'balance':
-        pos = [po for po in pos if po.balance and not po.selesai]
-    else:
-        filter_value = 'belum'
-        pos = [po for po in pos if not po.balance and not po.selesai]
+    cmts = list(
+        Master.objects.filter(kind='cmt')
+        .filter(Q(active=True) | Q(purchase_orders__isnull=False))
+        .distinct()
+    )
+    grouped = defaultdict(list)
+    for po in balance_flags(list(Po.objects.filter(cmt__isnull=False))):
+        grouped[po.cmt_id].append(po)
+    for cmt in cmts:
+        cmt.po_count = len(grouped[cmt.pk])
+        cmt.short_count = sum(po.summary['code'] == 'kurang_kirim' for po in grouped[cmt.pk])
+        cmt.shortage_count = cmt.short_count
     return render(
         request,
         'po_list.html',
         {
             'title': 'PO',
             'active': 'po',
-            'pos': pos,
-            'filter': filter_value,
+            'cmts': cmts,
+            'legacy_count': Po.objects.filter(cmt__isnull=True).count(),
         },
     )
 
 
-def po_rows(po, rolls):
-    colors = {roll.color_id: roll.color for roll in rolls}
-    results = {item.color_id: item.pcs for item in Hasil.objects.filter(po=po)}
-    roll_totals = {
-        row['color_id']: row
-        for row in Roll.objects.filter(alokasi__po=po)
-        .values('color_id')
-        .annotate(rolls=Count('id'), yard=Sum('yard'))
-    }
-    usage = dict(
-        Roll.objects.filter(alokasi__po=po, status__in=['dikirim', 'diterima', 'terpakai'])
-        .values('color_id')
-        .annotate(total=Sum('yard'))
-        .values_list('color_id', 'total')
+def render_po_list(request, cmt=None, legacy=False):
+    q = request.GET.get('q', '').strip()
+    filter_value = request.GET.get('filter', '')
+    queryset = Po.objects.filter(cmt=cmt).select_related('cmt').order_by('-id')
+    if q:
+        queryset = queryset.filter(Q(nomor__icontains=q) | Q(produk__icontains=q))
+    pos = balance_flags(list(queryset))
+    # Old list filters retain meaning when following bookmarked URLs.
+    filter_value = {'selesai': 'done', 'balance': 'done', 'belum': 'kurang_kirim'}.get(
+        filter_value, filter_value
     )
+    if filter_value:
+        pos = [po for po in pos if po.summary['code'] == filter_value]
+    page_obj = Paginator(pos, 30).get_page(request.GET.get('page'))
+    return render(
+        request,
+        'po_list.html',
+        {
+            'title': f'PO · {cmt.name}' if cmt else 'PO historis',
+            'active': 'po',
+            'cmt': cmt,
+            'legacy': legacy,
+            'pos': page_obj.object_list,
+            'filter': filter_value,
+            'q': q,
+            'page_obj': page_obj,
+            'po_count': len(pos),
+            'status_choices': [
+                ('kurang_kirim', 'Kurang kirim'),
+                ('done', 'Done'),
+                ('belum_ada_hasil', 'Belum ada hasil'),
+                ('belum_lengkap', 'Belum lengkap'),
+                ('lebih_kirim', 'Lebih kirim'),
+                ('belum_ada_produksi', 'Belum ada hasil produksi'),
+            ],
+            'back': request.get_full_path(),
+        },
+    )
+
+
+@access('purchasing', 'direktur')
+def po_cmt_list(request, pk):
+    return render_po_list(request, get_object_or_404(Master, pk=pk, kind='cmt'))
+
+
+@access('purchasing', 'direktur')
+def po_legacy_list(request):
+    return render_po_list(request, legacy=True)
+
+
+def po_rows(po, rolls):
     shipments = defaultdict(dict)
     dates = set()
     for item in KirimGudang.objects.filter(po=po).select_related('color'):
@@ -704,26 +1084,25 @@ def po_rows(po, rolls):
             shipments[item.color_id].get(item.tanggal, 0) + item.pcs
         )
         dates.add(item.tanggal)
+    summary = getattr(po, 'summary', None) or po_status(po)
     rows = []
-    for color_id, color in colors.items():
+    for status in summary['rows']:
+        color_id = status['color_id']
         selected = [roll for roll in rolls if roll.color_id == color_id]
-        result = results.get(color_id, 0)
-        sent = sum(shipments[color_id].values())
+        total_yard = sum((roll.yard for roll in selected), 0)
         rows.append(
             {
-                'color': color,
+                **status,
                 'invoices': ', '.join(dict.fromkeys(roll.invoice.nomor for roll in selected)),
                 'surat_jalan': ', '.join(
                     dict.fromkeys(
                         roll.invoice.surat_jalan for roll in selected if roll.invoice.surat_jalan
                     )
                 ),
-                'rolls': roll_totals[color_id]['rolls'],
-                'yard': roll_totals[color_id]['yard'],
-                'hasil': result,
+                'rolls': len(selected),
+                'yard': total_yard,
                 'sent': shipments[color_id],
-                'done': hitung_done(result, sent),
-                'pemakaian': hitung_pemakaian(usage.get(color_id, 0), result),
+                'pemakaian': hitung_pemakaian(total_yard, status['hasil'] or 0),
             }
         )
     return rows, sorted(dates)
@@ -731,15 +1110,14 @@ def po_rows(po, rolls):
 
 @access('purchasing', 'direktur')
 def po_detail(request, pk):
-    po = get_object_or_404(Po, pk=pk)
+    po = get_object_or_404(Po.objects.select_related('cmt'), pk=pk)
+    detail_error = None
+    action = request.POST.get('action')
+    form = PoForm(request.POST if action in ('edit', 'info') else None, instance=po)
     if request.method == 'POST':
         write_only(request)
-        if po.selesai:
-            raise PermissionDenied
-        action = request.POST.get('action')
         try:
-            if action == 'edit':
-                form = PoForm(request.POST, instance=po)
+            if action in ('edit', 'info'):
                 if not form.is_valid():
                     raise ValidationError(
                         '; '.join(
@@ -748,8 +1126,18 @@ def po_detail(request, pk):
                             for error in errors
                         )
                     )
-                form.save()
-                log(request.user, 'ubah PO', po.nomor)
+                with transaction.atomic():
+                    locked = Po.objects.select_for_update().get(pk=po.pk)
+                    if locked.tgl_order != form.cleaned_data['tgl_order']:
+                        previous = locked.tgl_order
+                        locked.tgl_order = form.cleaned_data['tgl_order']
+                        locked.save(update_fields=['tgl_order'])
+                        log(
+                            request.user,
+                            'ubah tanggal order PO',
+                            po.nomor,
+                            f'{previous or "belum diisi"} → {locked.tgl_order or "belum diisi"}',
+                        )
             elif action == 'hasil':
                 color = get_object_or_404(Master, pk=request.POST.get('color'), kind='color')
                 simpan_hasil(po, color, input_pcs(request.POST.get('pcs')), request.user)
@@ -770,29 +1158,44 @@ def po_detail(request, pk):
                         'gudang': warehouse,
                         'surat_jalan': request.POST.get('surat_jalan', ''),
                         'catatan': request.POST.get('catatan', ''),
+                        'request_id': request.POST.get('request_id') or None,
                     },
                     request.user,
                 )
-            elif action == 'selesai':
-                selesaikan_po(po, request.user)
             else:
                 raise ValidationError('Aksi PO tidak dikenal.')
             messages.success(request, 'PO diperbarui.')
+            back = safe_back(request, f'/po/cmt/{po.cmt_id}/' if po.cmt_id else '/po/historis/')
+            from urllib.parse import urlencode
+
+            return redirect(f'/po/{pk}/?{urlencode({"back": back})}')
         except (ValidationError, ValueError) as error:
             messages.error(request, str(error))
-        return redirect('po_detail', pk=pk)
+            detail_error = str(error)
+            po.refresh_from_db()
     rolls = list(
-        Roll.objects.filter(alokasi__po=po)
+        po_rolls(po)
         .select_related('invoice', 'material', 'color', 'alokasi__cmt')
         .order_by('color__name', 'invoice__nomor', 'urut')
     )
+    po.summary = po_status(po)
     rows, dates = po_rows(po, rolls)
+    for row in rows:
+        row['input_hasil'] = (
+            request.POST.get('pcs', '')
+            if detail_error
+            and action == 'hasil'
+            and str(row['color_id']) == request.POST.get('color')
+            else row['hasil']
+        )
     totals = {
         'rolls': sum(row['rolls'] for row in rows),
         'yard': sum((row['yard'] for row in rows), 0),
-        'hasil': sum(row['hasil'] for row in rows),
+        'hasil': po.summary['hasil'],
         'sent': {date: sum(row['sent'].get(date, 0) for row in rows) for date in dates},
-        'done': sum(row['done'] for row in rows),
+        'shipped': po.summary['terkirim'],
+        'remaining': po.summary['remaining'],
+        'over': po.summary['over'],
     }
     return render(
         request,
@@ -801,16 +1204,28 @@ def po_detail(request, pk):
             'title': po.nomor,
             'active': 'po',
             'po': po,
+            'summary': po.summary,
             'rolls': rolls,
             'rows': rows,
             'dates': dates,
             'totals': totals,
-            'balance': po_balance(po),
-            'form': PoForm(instance=po),
+            'balance': po.summary['is_done'],
+            'form': form,
             'colors': [row['color'] for row in rows],
             'warehouses': Master.objects.filter(kind='warehouse', active=True),
             'tgl_masuk': min((roll.tgl_terima for roll in rolls if roll.tgl_terima), default=None),
             'materials': ', '.join(dict.fromkeys(roll.material.name for roll in rolls)),
+            'shipments': KirimGudang.objects.filter(po=po)
+            .select_related('color', 'gudang')
+            .order_by('-tanggal', '-id'),
+            'request_id': request.POST.get('request_id') or uuid4().hex,
+            'posted': request.POST if detail_error else {},
+            'detail_error': detail_error,
+            'today': timezone.localdate(),
+            'back': safe_back(request, f'/po/cmt/{po.cmt_id}/' if po.cmt_id else '/po/historis/'),
+            'back_url': safe_back(
+                request, f'/po/cmt/{po.cmt_id}/' if po.cmt_id else '/po/historis/'
+            ),
         },
     )
 
@@ -905,7 +1320,7 @@ def accounts(request):
     )
 
 
-@access('admin', 'direktur')
+@access('admin', 'direktur', 'purchasing')
 def history(request):
     rows = Log.objects.select_related('user').order_by('-waktu')
     if request.GET.get('user', '').isdigit():
@@ -957,12 +1372,12 @@ def invoice_export(request, pk):
         f'invoice-{pk}',
         [
             'Invoice',
-            'Grup PO',
             'Bahan',
             'Warna',
             'Roll',
             'Yard',
             'Status',
+            'No. pengiriman',
             'PO',
             'CMT',
             'Tanggal kirim',
@@ -971,16 +1386,13 @@ def invoice_export(request, pk):
         [
             [
                 invoice.nomor,
-                (
-                    roll.invoice_po.po.nomor if roll.invoice_po.po_id
-                    else f'PO {roll.invoice_po.urut}'
-                ) if roll.invoice_po_id else '',
                 roll.material.name,
                 roll.color.name,
                 roll.urut,
                 roll.yard,
                 roll.get_status_display(),
-                roll.alokasi.po.nomor if roll.alokasi_id else '',
+                roll.alokasi_id,
+                roll.alokasi.po.nomor if roll.alokasi_id and roll.alokasi.po_id else '',
                 roll.alokasi.cmt.name if roll.alokasi_id else '',
                 roll.tgl_kirim,
                 roll.tgl_terima,
@@ -992,34 +1404,51 @@ def invoice_export(request, pk):
 
 @access('purchasing', 'direktur')
 def po_export(request, pk):
-    po = get_object_or_404(Po, pk=pk)
-    rolls = list(Roll.objects.filter(alokasi__po=po).select_related('invoice', 'color'))
+    po = get_object_or_404(Po.objects.select_related('cmt'), pk=pk)
+    po.summary = po_status(po)
+    rolls = list(po_rolls(po).select_related('invoice', 'color'))
     rows, dates = po_rows(po, rolls)
     return download_xlsx(
         f'po-{pk}',
         [
+            'CMT',
             'PO',
-            'Invoice',
-            'Surat jalan',
+            'Nama produk',
+            'Tanggal order',
+            'Tgl kirim gudang terakhir',
+            'Status PO',
+            'Invoice sumber',
+            'Surat jalan invoice',
             'Warna',
             'Roll',
-            'Yard',
-            'Hasil',
+            'Total yard alokasi',
+            'Hasil produksi (pcs)',
+            'Total terkirim (pcs)',
+            'Sisa kirim (pcs)',
+            'Lebih kirim (pcs)',
+            'Status warna',
             *[date.isoformat() for date in dates],
-            'DONE',
-            'Pemakaian',
+            'Pemakaian (yard/pcs)',
         ],
         [
             [
+                po.cmt.name if po.cmt_id else 'Belum dipetakan',
                 po.nomor,
+                po.produk,
+                po.tgl_order,
+                po.summary['last_shipment'],
+                po.summary['label'],
                 row['invoices'],
                 row['surat_jalan'],
                 row['color'].name,
                 row['rolls'],
                 row['yard'],
                 row['hasil'],
+                row['shipped'],
+                row['remaining'],
+                row['over'],
+                row['status_label'],
                 *[row['sent'].get(date, 0) for date in dates],
-                row['done'],
                 row['pemakaian'] if row['pemakaian'] else '',
             ]
             for row in rows

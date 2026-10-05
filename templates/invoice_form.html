@@ -1,146 +1,49 @@
 {% extends 'base.html' %}{% load tracker %}
 {% block content %}
-<div class="page-head"><div><a class="back" href="{% url 'vendor_list' %}">Vendor</a>
-  <h1>{{ title }}</h1></div></div>
-<form method="post" enctype="multipart/form-data" id="invoice-form"
-  data-restore="{{ form_error|yesno:'true,false' }}" data-submit-form>
-  {% csrf_token %}
+<div class="page-head"><div><a class="back" href="{% if invoice %}{% url 'invoice_detail' invoice.pk %}{% else %}{% url 'vendor_list' %}{% endif %}">Kembali</a>
+  <h1>{{ title }}</h1><p>Catat invoice, lalu susun bahan dan warna beserta yard setiap roll.</p></div></div>
+<form method="post" enctype="multipart/form-data" id="invoice-form" data-submit-form data-import-preview-url="{% url 'invoice_yard_preview' %}">
+  {% csrf_token %}<input type="hidden" name="request_id" value="{{ request_id }}"><input type="hidden" name="group_count" id="group-count" value="{% if input_groups %}{{ input_groups|length }}{% elif invoice and existing_material_count >= 10 %}0{% else %}1{% endif %}">
   {% if existing %}<input type="hidden" name="existing" value="1">{% endif %}
-  <section class="panel form-section"><h2>Invoice</h2>
+  {% if form_error %}<div class="form-error-summary" role="alert" tabindex="-1" data-error-summary><strong>Invoice belum tersimpan.</strong><p>Periksa isian yang ditandai. Data yang sudah Anda isi tetap tersedia.</p></div>{% endif %}
+  {{ form.non_field_errors }}
+  <section class="panel form-section"><h2>Informasi invoice</h2>
     <div class="field-grid">
-      {% for field in form %}
-      <div class="field {% if field.name == 'catatan' or field.name == 'invoice_file' %}wide{% endif %}">
+      {% for field in form %}{% if field.name != 'catatan' %}
+      <div class="field {% if field.name == 'invoice_file' %}wide{% endif %}">
         <label for="{{ field.id_for_label }}">{{ field.label }}</label>
         {% if field.name == 'vendor' %}
-        <div data-combo><input id="{{ field.id_for_label }}" name="vendor"
-          value="{{ field.value|default:'' }}" autocomplete="off" role="combobox"
-          aria-autocomplete="list" aria-expanded="false" aria-controls="vendor-options"
-          required><div class="combo-list" id="vendor-options" role="listbox" hidden>
-          {% for item in vendors %}<button type="button" role="option"
-            data-value="{{ item.name }}">{{ item.name }}</button>{% endfor %}</div></div>
+        <input id="{{ field.id_for_label }}" name="vendor" value="{{ field.value|default:'' }}" list="vendor-options" required {% if locked_metadata %}readonly{% endif %}>
         {% else %}{{ field }}{% endif %}{{ field.errors }}
-        {% if field.name == 'invoice_file' %}
-        <p class="field-help">PDF, JPG, atau PNG. Maksimal 10 MB.</p>
-        {% if attachment %}<p class="field-help">Tersimpan: <a href="{% url 'invoice_attachment' invoice.pk %}">{{ attachment.filename }}</a>. Pilih file baru untuk mengganti.</p>{% endif %}
-        {% endif %}
-      </div>{% endfor %}
+        {% if field.name == 'invoice_file' %}<p class="field-help">PDF, JPG, atau PNG. Maksimal 10 MB.</p>
+        {% if attachment %}<p class="field-help">Tersimpan: <a href="{% url 'invoice_attachment' invoice.pk %}">{{ attachment.filename }}</a>. Pilih file baru untuk mengganti.</p>{% endif %}{% endif %}
+      </div>{% endif %}{% endfor %}
     </div>
   </section>
-  {% if po_groups %}
-  <section class="panel form-section section-gap"><h2>PO dalam invoice</h2>
-    <div class="field-grid">
-      {% for group in po_groups %}
-      <div class="field"><label for="{{ group.field_name }}">PO {{ group.urut }} · {{ group.roll_count }} roll</label>
-        <input id="{{ group.field_name }}" name="{{ group.field_name }}"
-          value="{{ group.form_value }}" maxlength="80"
-          {% if group.allocated_count %}readonly{% endif %}>
-        {% if group.allocated_count %}<p class="field-help">Terkunci karena ada roll teralokasi.</p>{% endif %}
-      </div>{% endfor %}
-    </div>
-  </section>
-  {% endif %}
+  <datalist id="vendor-options">{% for item in vendors %}<option value="{{ item.name }}"></option>{% endfor %}</datalist>
+  <datalist id="material-options">{% for item in materials %}<option value="{{ item.name }}"></option>{% endfor %}</datalist>
+  <datalist id="color-options">{% for item in colors %}<option value="{{ item.name }}"></option>{% endfor %}</datalist>
+  <datalist id="warehouse-options">{% for item in warehouses %}<option value="{{ item.name }}"></option>{% endfor %}</datalist>
   {% if existing %}
-  <section class="panel section-gap"><div class="panel-head"><h2>Roll tercatat</h2></div>
-    <datalist id="existing-materials">{% for item in materials %}<option value="{{ item.name }}"></option>{% endfor %}</datalist>
-    <datalist id="existing-colors">{% for item in colors %}<option value="{{ item.name }}"></option>{% endfor %}</datalist>
-    <datalist id="existing-warehouses">{% for item in warehouses %}<option value="{{ item.name }}"></option>{% endfor %}</datalist>
-    <div class="table-wrap wide-table-wrap"><table class="roll-edit-table"><thead><tr><th>PO</th><th>Bahan</th><th>Warna</th>
-      <th>Lokasi</th><th class="num">Roll</th><th>Yard</th><th>Status</th></tr></thead><tbody>
-      {% for roll in existing %}<tr>
-      <td>{% if roll.invoice_po %}{% if roll.invoice_po.po %}{{ roll.invoice_po.po.nomor }}{% else %}PO {{ roll.invoice_po.urut }}{% endif %}{% else %}—{% endif %}</td>
-      <td><label class="sr-only" for="material-{{ roll.pk }}">Bahan roll {{ roll.urut }}</label>
-        <input id="material-{{ roll.pk }}" name="existing-{{ roll.pk }}-material"
-          value="{{ roll.material.name }}" list="existing-materials"
-          {% if roll.status != 'tersedia' %}readonly{% endif %}></td>
-      <td><label class="sr-only" for="color-{{ roll.pk }}">Warna roll {{ roll.urut }}</label>
-        <input id="color-{{ roll.pk }}" name="existing-{{ roll.pk }}-color"
-          value="{{ roll.color.name }}" list="existing-colors"
-          {% if roll.status != 'tersedia' %}readonly{% endif %}></td>
-      <td><label class="sr-only" for="lokasi-{{ roll.pk }}">Lokasi roll {{ roll.urut }}</label>
-        <input id="lokasi-{{ roll.pk }}" name="existing-{{ roll.pk }}-lokasi"
-          value="{{ roll.lokasi.name|default:'' }}" list="existing-warehouses"
-          {% if roll.status != 'tersedia' %}readonly{% endif %}></td>
-      <td class="num">{{ roll.urut }}</td>
-      <td><label class="sr-only" for="existing-{{ roll.pk }}">Yard roll {{ roll.urut }}</label>
-        <input id="existing-{{ roll.pk }}" name="existing-{{ roll.pk }}"
-          value="{{ roll.yard }}" inputmode="decimal" {% if roll.status != 'tersedia' %}readonly{% endif %}></td>
-      <td>{% include 'partials/status.html' with item=roll %}</td></tr>
-      {% endfor %}</tbody></table></div>
-  </section>
-  {% endif %}
-  <div id="groups" data-edit="{{ invoice|yesno:'true,false' }}">
-    <section class="panel yard-group section-gap" data-group>
-      <div class="panel-head"><h2>PO <span data-group-number>1</span></h2>
-        <button class="button small" type="button" data-remove-group>Hapus PO</button></div>
-      <div class="field-grid three">
-        <div class="field wide"><label>Nomor PO (jika sudah ada)</label><div data-combo>
-          <input name="po[]" maxlength="80" placeholder="Contoh: PO 109" autocomplete="off"
-            role="combobox" aria-autocomplete="list" aria-expanded="false">
-          <div class="combo-list" role="listbox" hidden>
-            {% for po in pos %}<button type="button" role="option" data-value="{{ po.nomor }}">{{ po.nomor }}</button>{% endfor %}
-          </div></div><p class="field-help">Boleh kosong. Nomor PO dapat ditentukan saat alokasi.</p></div>
-        <div class="field"><label>Bahan</label><div data-combo>
-          <input name="material[]" autocomplete="off" role="combobox" aria-autocomplete="list"
-            aria-expanded="false" aria-controls="material-options-0">
-          <div class="combo-list" id="material-options-0" role="listbox" hidden>
-            {% for item in materials %}<button type="button" role="option"
-              data-value="{{ item.name }}">{{ item.name }}</button>{% endfor %}</div>
-        </div></div>
-        <div class="field"><label>Warna</label><div data-combo>
-          <input name="color[]" autocomplete="off" role="combobox" aria-autocomplete="list"
-            aria-expanded="false" aria-controls="color-options-0">
-          <div class="combo-list" id="color-options-0" role="listbox" hidden>
-            {% for item in colors %}<button type="button" role="option"
-              data-value="{{ item.name }}">{{ item.name }}</button>{% endfor %}</div>
-        </div></div>
-        <div class="field"><label>Lokasi / gudang</label><div data-combo>
-          <input name="lokasi[]" autocomplete="off" role="combobox" aria-autocomplete="list"
-            aria-expanded="false" aria-controls="warehouse-options-0">
-          <div class="combo-list" id="warehouse-options-0" role="listbox" hidden>
-            {% for item in warehouses %}<button type="button" role="option"
-              data-value="{{ item.name }}">{{ item.name }}</button>{% endfor %}</div>
-        </div></div>
-      </div>
-      <div class="group-note"><button class="link-button" type="button" data-note-open>Tambah catatan</button>
-        <div hidden><label>Catatan bahan<textarea name="catatan[]" rows="2"></textarea></label></div></div>
-      {% include 'partials/yard.html' with file_name='file-0' %}
-    </section>
+  <section class="panel section-gap"><div class="panel-head"><div><h2>Roll tercatat</h2><p>Roll yang sudah dialokasikan terkunci. Tambahkan bahan baru di bawah tabel.</p></div></div>
+    <div class="table-wrap wide-table-wrap"><table class="roll-edit-table"><thead><tr><th>Bahan</th><th>Warna</th><th>Lokasi</th><th class="num">Roll</th><th class="num">Yard</th><th>Status</th></tr></thead><tbody>
+      {% for roll in existing %}<tr data-existing-color="{{ roll.invoice_color_id|default:'' }}">
+      <td><label class="sr-only" for="material-{{ roll.pk }}">Bahan roll {{ roll.urut }}</label><input id="material-{{ roll.pk }}" name="existing-{{ roll.pk }}-material" value="{{ roll.edit_material }}" list="material-options" {% if roll.status != 'tersedia' %}readonly{% endif %}></td>
+      <td><label class="sr-only" for="color-{{ roll.pk }}">Warna roll {{ roll.urut }}</label><input id="color-{{ roll.pk }}" name="existing-{{ roll.pk }}-color" value="{{ roll.edit_color }}" list="color-options" {% if roll.status != 'tersedia' %}readonly{% endif %}></td>
+      <td><label class="sr-only" for="lokasi-{{ roll.pk }}">Lokasi roll {{ roll.urut }}</label><input id="lokasi-{{ roll.pk }}" name="existing-{{ roll.pk }}-lokasi" value="{{ roll.edit_lokasi }}" list="warehouse-options" {% if roll.status != 'tersedia' %}readonly{% endif %}></td>
+      <td class="num">{{ roll.urut }}</td><td><label class="sr-only" for="existing-{{ roll.pk }}">Yard roll {{ roll.urut }}</label><input id="existing-{{ roll.pk }}" name="existing-{{ roll.pk }}" value="{{ roll.edit_yard }}" inputmode="decimal" {% if roll.status != 'tersedia' %}readonly{% endif %}></td>
+      <td>{% include 'partials/status.html' with item=roll %}</td></tr>{% endfor %}
+    </tbody></table></div>
+  </section>{% endif %}
+  <div class="section-intro section-gap"><h2>{% if existing %}Tambahan bahan{% else %}Bahan dalam invoice{% endif %}</h2><p>Maksimal 10 nama bahan. Setiap bahan dapat memiliki beberapa baris warna. Nomor PO diisi melalui CMT setelah bahan diterima.</p></div>
+  <div id="groups" data-edit="{{ invoice|yesno:'true,false' }}" data-existing-count="{{ existing_material_count|default:0 }}">
+    {% if input_groups %}{% for group in input_groups %}{% include 'partials/material_group.html' with group=group group_index=forloop.counter0 %}{% endfor %}
+    {% elif not invoice or existing_material_count < 10 %}{% include 'partials/material_group.html' with group_index=0 %}{% endif %}
   </div>
-  <button class="button section-gap" type="button" id="add-group">Tambah PO</button>
-  <div class="save-bar"><strong id="invoice-summary">1 PO · 0 roll · 0,00 yd</strong>
-    <div class="row-actions"><a class="button" href="{% url 'vendor_list' %}">Batal</a>
-      <button class="button primary" type="submit">Simpan invoice</button></div></div>
+  <div class="row-actions section-gap"><button class="button" type="button" id="add-group" {% if invoice and existing_material_count >= 10 %}disabled{% endif %}>Tambah nama bahan</button><span class="field-help" id="group-limit">{% if invoice and existing_material_count >= 10 %}Batas 10 bahan sudah tercatat. Anda tetap dapat memperbarui invoice dan roll tersedia.{% else %}Maksimal 10 bahan per invoice.{% endif %}</span></div>
+  <div class="save-bar"><strong id="invoice-summary" aria-live="polite">1 bahan · 1 baris warna · 0 roll · 0,00 yard</strong>
+    <div class="row-actions"><a class="button" href="{% if invoice %}{% url 'invoice_detail' invoice.pk %}{% else %}{% url 'vendor_list' %}{% endif %}">Batal</a><button class="button primary" type="submit">Simpan invoice</button></div></div>
 </form>
-<template id="group-template">
-  <section class="panel yard-group section-gap" data-group>
-    <div class="panel-head"><h2>PO <span data-group-number></span></h2>
-      <button class="button small" type="button" data-remove-group>Hapus PO</button></div>
-    <div class="field-grid three">
-      <div class="field wide"><label>Nomor PO (jika sudah ada)</label><div data-combo>
-        <input name="po[]" maxlength="80" placeholder="Contoh: PO 109" autocomplete="off"
-          role="combobox" aria-autocomplete="list" aria-expanded="false">
-        <div class="combo-list" role="listbox" hidden>
-          {% for po in pos %}<button type="button" role="option" data-value="{{ po.nomor }}">{{ po.nomor }}</button>{% endfor %}
-        </div></div><p class="field-help">Boleh kosong. Nomor PO dapat ditentukan saat alokasi.</p></div>
-      <div class="field"><label>Bahan</label><div data-combo><input name="material[]"
-        autocomplete="off" role="combobox" aria-autocomplete="list" aria-expanded="false">
-        <div class="combo-list" role="listbox" hidden>
-        {% for item in materials %}<button type="button" role="option"
-          data-value="{{ item.name }}">{{ item.name }}</button>{% endfor %}</div></div></div>
-      <div class="field"><label>Warna</label><div data-combo><input name="color[]"
-        autocomplete="off" role="combobox" aria-autocomplete="list" aria-expanded="false">
-        <div class="combo-list" role="listbox" hidden>
-        {% for item in colors %}<button type="button" role="option"
-          data-value="{{ item.name }}">{{ item.name }}</button>{% endfor %}</div></div></div>
-      <div class="field"><label>Lokasi / gudang</label><div data-combo><input name="lokasi[]"
-        autocomplete="off" role="combobox" aria-autocomplete="list" aria-expanded="false">
-        <div class="combo-list" role="listbox" hidden>
-        {% for item in warehouses %}<button type="button" role="option"
-          data-value="{{ item.name }}">{{ item.name }}</button>{% endfor %}</div></div></div>
-    </div>
-    <div class="group-note"><button class="link-button" type="button" data-note-open>Tambah catatan</button>
-      <div hidden><label>Catatan bahan<textarea name="catatan[]" rows="2"></textarea></label></div></div>
-    {% include 'partials/yard.html' with file_name='file-x' %}
-  </section>
-</template>
+<template id="group-template">{% include 'partials/material_group.html' with group_index=0 group=None %}</template>
+<template id="color-row-template">{% include 'partials/color_row.html' with group_index=0 row_index=0 row=None %}</template>
 {% endblock %}

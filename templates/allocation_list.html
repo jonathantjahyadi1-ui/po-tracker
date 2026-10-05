@@ -1,16 +1,9 @@
-{% extends 'base.html' %}
+{% extends 'base.html' %}{% load tracker %}
 {% block content %}
-<div class="page-head"><h1>Alokasi</h1></div>
-<nav class="tabs" aria-label="Status alokasi"><a href="{% url 'allocation_list' %}"
-  {% if not status %}aria-current="page"{% endif %}>Semua</a>
-  {% for value,label in statuses %}<a href="?status={{ value }}"
-  {% if status == value %}aria-current="page"{% endif %}>{{ label }}</a>{% endfor %}</nav>
-<section class="panel"><div class="table-wrap"><table><thead><tr><th>PO</th><th>CMT</th>
-  <th class="num">Roll</th><th>Status</th><th>Dibuat</th></tr></thead><tbody>
-  {% for item in rows %}<tr><td><a class="ref" href="{% url 'allocation_detail' item.pk %}">{{ item.po.nomor }}</a></td>
-  <td>{{ item.cmt.name }}</td><td class="num">{{ item.roll_count }}</td>
-  <td>{% include 'partials/status.html' with item=item %}</td>
-  <td>{{ item.created_at|date:"d M Y" }}</td></tr>
-  {% empty %}<tr><td colspan="5" class="empty">Belum ada alokasi.</td></tr>{% endfor %}
-  </tbody></table></div></section>
+<div class="page-head"><div><h1>Alokasi</h1><p>Tinjau pengajuan dan pantau pengiriman bahan ke CMT.</p></div></div>
+<nav class="tabs" aria-label="Status alokasi"><a href="{% url 'allocation_list' %}" {% if not status %}aria-current="page"{% endif %}>Semua</a>{% for value,label in statuses %}<a href="?status={{ value }}" {% if status == value %}aria-current="page"{% endif %}>{% if value == 'disetujui' %}Dikirim{% else %}{{ label }}{% endif %}</a>{% endfor %}</nav>
+<section class="panel"><div class="table-wrap wide-table-wrap"><table><thead><tr><th>No.</th><th>Vendor / invoice</th><th>CMT tujuan</th><th class="num">Roll</th><th class="num">Total yard</th><th>Status</th><th>Waktu pengajuan</th><th>PO</th></tr></thead><tbody>
+{% for item in rows %}<tr><td><a class="ref" href="{% url 'allocation_detail' item.pk %}">{{ item.pk }}</a></td><td>{{ item.vendor_labels|default:"—" }}<small class="cell-note">{{ item.invoice_labels|default:"—" }}</small></td><td><a href="{% url 'cmt_detail' item.cmt_id %}?allocation={{ item.pk }}#pengiriman-{{ item.pk }}">{{ item.cmt.name }}</a></td><td class="num">{{ item.roll_count }} roll</td><td class="num">{{ item.yard_total|indo }} yard</td><td>{% include 'partials/status.html' with item=item %}</td><td class="nowrap">{{ item.created_at|date:"d M Y H:i" }}</td><td>{% if item.po_id %}<a href="{% url 'po_detail' item.po_id %}">{{ item.po.nomor }}</a>{% else %}Belum diisi{% endif %}</td></tr>{% empty %}<tr><td colspan="8" class="empty">Belum ada alokasi{% if status %} pada status ini{% endif %}. Pilih roll tersedia dari invoice vendor untuk mengajukan pengiriman ke CMT.</td></tr>{% endfor %}
+</tbody></table></div></section>
+{% if page_obj.has_other_pages %}<nav class="pagination" aria-label="Halaman alokasi">{% if page_obj.has_previous %}<a class="button small" href="?status={{ status|urlencode }}&amp;page={{ page_obj.previous_page_number }}">Sebelumnya</a>{% endif %}<span>Halaman {{ page_obj.number }} dari {{ page_obj.paginator.num_pages }}</span>{% if page_obj.has_next %}<a class="button small" href="?status={{ status|urlencode }}&amp;page={{ page_obj.next_page_number }}">Berikutnya</a>{% endif %}</nav>{% endif %}
 {% endblock %}

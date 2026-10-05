@@ -1,1 +1,1 @@
-<span class="status {{ item.status }}">{{ item.get_status_display }}</span>
+﻿{% if item.summary %}<span class="status {{ item.summary.code }}">{{ item.summary.label }}</span>{% elif item.status_label %}<span class="status {{ item.status_key }}">{{ item.status_label }}</span>{% elif item.status == 'disetujui' %}<span class="status dikirim">Dikirim</span>{% else %}<span class="status {{ item.status }}">{{ item.get_status_display }}</span>{% endif %}
