@@ -16,6 +16,7 @@ from .services import (
     ajukan_alokasi,
     batalkan_invoice,
     kirim_gudang,
+    map_legacy_production,
     po_status,
     po_status_many,
     putuskan_alokasi,
@@ -270,6 +271,70 @@ class ServiceSafetyTests(TestCase):
         self.assertFalse(by_color[self.roll.color_id]['has_result'])
         self.assertIsNone(by_color[self.roll.color_id]['remaining'])
         self.assertEqual(by_color[other_color.pk]['hasil'], 0)
+
+    def test_single_material_legacy_null_is_not_guessed_until_mapping(self):
+        _, po = self.ready_po()
+        historical = Hasil.objects.create(po=po, color=self.roll.color, pcs=100)
+        shipment = KirimGudang.objects.create(
+            po=po, color=self.roll.color, tanggal=self.today, pcs=60
+        )
+        state = po_status(po)
+        self.assertTrue(state['unmapped_material'])
+        self.assertFalse(state['is_done'])
+        self.assertEqual((state['hasil'], state['terkirim']), (100, 60))
+        for callback in (
+            lambda: simpan_hasil(po, self.roll.color, 120, self.user),
+            lambda: kirim_gudang(
+                po, self.roll.color, {'tanggal': self.today, 'pcs': 10}, self.user
+            ),
+        ):
+            with self.assertRaisesMessage(ValidationError, 'Petakan bahan'):
+                callback()
+        map_legacy_production(po, self.roll.color, self.roll.material, self.user)
+        historical.refresh_from_db()
+        shipment.refresh_from_db()
+        self.assertEqual(
+            (historical.material_id, shipment.material_id),
+            (self.roll.material_id, self.roll.material_id),
+        )
+        logs = Log.objects.count()
+        map_legacy_production(po, self.roll.color, self.roll.material, self.user)
+        self.assertEqual(Log.objects.count(), logs)
+        simpan_hasil(po, self.roll.color, 120, self.user)
+        self.assertEqual(po_status(po)['remaining'], 60)
+        self.assertEqual(
+            (historical.pk, shipment.pk),
+            (Hasil.objects.get(po=po).pk, KirimGudang.objects.get(po=po).pk),
+        )
+
+    def test_mapping_rejects_existing_target_shipment_without_losing_legacy_result(self):
+        _, po = self.ready_po()
+        historical = Hasil.objects.create(po=po, color=self.roll.color, pcs=100)
+        target = KirimGudang.objects.create(
+            po=po, material=self.roll.material, color=self.roll.color, tanggal=self.today, pcs=10
+        )
+        logs = Log.objects.count()
+        with self.assertRaises(ValidationError):
+            map_legacy_production(po, self.roll.color, self.roll.material, self.user)
+        historical.refresh_from_db()
+        target.refresh_from_db()
+        self.assertEqual(
+            (historical.material_id, historical.pcs, target.material_id, target.pcs),
+            (None, 100, self.roll.material_id, 10),
+        )
+        self.assertEqual(Log.objects.count(), logs)
+
+    def test_mapping_rejects_unrelated_material_and_nonpurchasing_caller(self):
+        _, po = self.ready_po()
+        historical = Hasil.objects.create(po=po, color=self.roll.color, pcs=100)
+        unrelated = Master.objects.create(kind='material', name='Unrelated')
+        with self.assertRaises(ValidationError):
+            map_legacy_production(po, self.roll.color, unrelated, self.user)
+        director = User.objects.create_user(username='mapping-director', role='direktur')
+        with self.assertRaises(PermissionDenied):
+            map_legacy_production(po, self.roll.color, self.roll.material, director)
+        historical.refresh_from_db()
+        self.assertIsNone(historical.material_id)
 
 
 class InvoiceLockConcurrencyTests(TransactionTestCase):

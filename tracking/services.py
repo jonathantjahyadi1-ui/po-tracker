@@ -97,15 +97,60 @@ def po_rolls(po):
     return Roll.objects.filter(Q(alokasi__po=po) | Q(alokasi__isnull=True, invoice_po__po=po))
 
 
-def yard_po(po, warna):
+def production_material(po, color, material=None):
+    source_ids = list(
+        po_rolls(po).filter(color=color).values_list('material_id', flat=True).distinct()
+    )
+    if not source_ids:
+        raise ValidationError('Warna belum memiliki roll di PO ini.')
+    if material is None:
+        if len(source_ids) != 1:
+            raise ValidationError(
+                f'Pilih bahan untuk warna {color.name}; warna ini dipakai beberapa bahan di PO.'
+            )
+        material_id = source_ids[0]
+    else:
+        try:
+            material_id = material.pk if isinstance(material, Master) else int(material)
+        except (TypeError, ValueError):
+            raise ValidationError('Pilih bahan yang terkait PO dan warna ini.')
+        if material_id not in source_ids:
+            raise ValidationError('Bahan belum memiliki roll untuk warna ini di PO.')
+    found = Master.objects.filter(pk=material_id, kind=Master.Kind.MATERIAL).first()
+    if not found:
+        raise ValidationError('Pilih bahan yang terkait PO dan warna ini.')
+    return found
+
+
+def require_mapped_production(po, color):
+    if Hasil.objects.filter(po=po, color=color, material=None).exists() or (
+        KirimGudang.objects.filter(po=po, color=color, material=None).exists()
+    ):
+        raise ValidationError(
+            f'Petakan bahan pada data hasil/kiriman lama warna {color.name} '
+            'sebelum mencatat hasil atau kiriman baru.'
+        )
+
+
+def yard_po(po, warna, material=None):
+    material = production_material(po, warna, material)
     return yard_total(
-        po_rolls(po).filter(color=warna, status__in=['dikirim', 'diterima', 'terpakai'])
+        po_rolls(po).filter(
+            material=material, color=warna, status__in=['dikirim', 'diterima', 'terpakai']
+        )
     )
 
 
-def done(po, warna):
-    hasil = Hasil.objects.filter(po=po, color=warna).values_list('pcs', flat=True).first()
-    kirim = KirimGudang.objects.filter(po=po, color=warna).aggregate(total=Sum('pcs'))
+def done(po, warna, material=None):
+    material = production_material(po, warna, material)
+    hasil = (
+        Hasil.objects.filter(po=po, material=material, color=warna)
+        .values_list('pcs', flat=True)
+        .first()
+    )
+    kirim = KirimGudang.objects.filter(po=po, material=material, color=warna).aggregate(
+        total=Sum('pcs')
+    )
     return hitung_done(hasil, kirim['total'])
 
 
@@ -113,9 +158,14 @@ def hitung_done(hasil, terkirim):
     return None if hasil is None else hasil - (terkirim or 0)
 
 
-def pemakaian(po, warna):
-    hasil = Hasil.objects.filter(po=po, color=warna).values_list('pcs', flat=True).first()
-    return hitung_pemakaian(yard_po(po, warna), hasil)
+def pemakaian(po, warna, material=None):
+    material = production_material(po, warna, material)
+    hasil = (
+        Hasil.objects.filter(po=po, material=material, color=warna)
+        .values_list('pcs', flat=True)
+        .first()
+    )
+    return hitung_pemakaian(yard_po(po, warna, material), hasil)
 
 
 def hitung_pemakaian(yard, hasil):
@@ -124,13 +174,23 @@ def hitung_pemakaian(yard, hasil):
     return (yard / Decimal(hasil)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
 
 
-def _resolve_po(colors, results, shipments, last_shipment):
+def _resolve_po(pairs, results, shipments, last_shipment):
     rows = []
-    for color_id, color in sorted(
-        colors.items(), key=lambda item: (item[1].name.casefold(), item[0])
+    legacy_colors = {color_id for material_id, color_id in pairs if material_id is None}
+    for pair, details in sorted(
+        pairs.items(),
+        key=lambda item: (
+            item[0][0] is None,
+            item[1]['material'].name.casefold() if item[1]['material'] else '',
+            item[1]['color'].name.casefold(),
+            item[0][0] or 0,
+            item[0][1],
+        ),
     ):
-        hasil = results.get(color_id)
-        shipped = shipments.get(color_id, 0)
+        material_id, color_id = pair
+        material, color = details['material'], details['color']
+        hasil = results.get(pair)
+        shipped = shipments.get(pair, 0)
         delta = hitung_done(hasil, shipped)
         remaining = None if delta is None else max(delta, 0)
         over = 0 if delta is None else max(-delta, 0)
@@ -144,8 +204,16 @@ def _resolve_po(colors, results, shipments, last_shipment):
             key, label = 'done', 'Done'
         else:
             key, label = 'belum_ada_produksi', 'Belum ada hasil produksi'
+        if material_id is None:
+            if key == 'done':
+                key, label = 'belum_lengkap', 'Bahan belum dipetakan (data lama)'
+            else:
+                label += ' · Bahan belum dipetakan (data lama)'
         rows.append(
             {
+                'key': pair,
+                'material': material,
+                'material_id': material_id,
                 'color': color,
                 'color_id': color_id,
                 'hasil': hasil,
@@ -156,6 +224,8 @@ def _resolve_po(colors, results, shipments, last_shipment):
                 'over': over,
                 'status_key': key,
                 'status_label': label,
+                'unmapped_material': material_id is None,
+                'has_unmapped_legacy': color_id in legacy_colors,
             }
         )
     remaining = sum(row['remaining'] or 0 for row in rows)
@@ -166,6 +236,8 @@ def _resolve_po(colors, results, shipments, last_shipment):
         code, label = 'lebih_kirim', 'Lebih kirim'
     elif remaining:
         code, label = 'kurang_kirim', 'Kurang kirim'
+    elif legacy_colors:
+        code, label = 'belum_lengkap', 'Belum lengkap'
     elif not results:
         code, label = 'belum_ada_hasil', 'Belum ada hasil'
     elif missing:
@@ -185,6 +257,7 @@ def _resolve_po(colors, results, shipments, last_shipment):
         'terkirim': sum(shipments.values()),
         'missing_results': missing,
         'is_done': code == 'done',
+        'unmapped_material': bool(legacy_colors),
         'last_shipment': last_shipment,
         'rows': rows,
     }
@@ -195,35 +268,50 @@ def po_status_many(pos):
     ids = [item.pk if isinstance(item, Po) else int(item) for item in pos]
     if not ids:
         return {}
-    color_ids = {po_id: set() for po_id in ids}
+    pair_ids = {po_id: set() for po_id in ids}
     rolls = Roll.objects.filter(
         Q(alokasi__po_id__in=ids) | Q(alokasi__isnull=True, invoice_po__po_id__in=ids)
-    ).values_list('alokasi__po_id', 'invoice_po__po_id', 'color_id')
-    for allocation_po, legacy_po, color_id in rolls:
-        color_ids[allocation_po or legacy_po].add(color_id)
+    ).values_list('alokasi__po_id', 'invoice_po__po_id', 'material_id', 'color_id')
+    for allocation_po, legacy_po, material_id, color_id in rolls:
+        pair_ids[allocation_po or legacy_po].add((material_id, color_id))
     results = {po_id: {} for po_id in ids}
-    for po_id, color_id, pcs in Hasil.objects.filter(po_id__in=ids).values_list(
-        'po_id', 'color_id', 'pcs'
+    for po_id, material_id, color_id, pcs in Hasil.objects.filter(po_id__in=ids).values_list(
+        'po_id', 'material_id', 'color_id', 'pcs'
     ):
-        results[po_id][color_id] = pcs
-        color_ids[po_id].add(color_id)
+        pair = (material_id, color_id)
+        results[po_id][pair] = pcs
+        pair_ids[po_id].add(pair)
     shipments = {po_id: {} for po_id in ids}
     last = {po_id: None for po_id in ids}
     totals = (
         KirimGudang.objects.filter(po_id__in=ids)
-        .values('po_id', 'color_id')
+        .values('po_id', 'material_id', 'color_id')
         .annotate(total=Sum('pcs'), latest=Max('tanggal'))
     )
     for item in totals:
-        po_id, color_id = item['po_id'], item['color_id']
-        shipments[po_id][color_id] = item['total']
-        color_ids[po_id].add(color_id)
+        po_id = item['po_id']
+        pair = (item['material_id'], item['color_id'])
+        shipments[po_id][pair] = item['total']
+        pair_ids[po_id].add(pair)
         if last[po_id] is None or item['latest'] > last[po_id]:
             last[po_id] = item['latest']
-    all_colors = Master.objects.in_bulk(set().union(*color_ids.values()))
+    master_ids = {
+        master_id
+        for pairs in pair_ids.values()
+        for pair in pairs
+        for master_id in pair
+        if master_id is not None
+    }
+    all_masters = Master.objects.in_bulk(master_ids)
     return {
         po_id: _resolve_po(
-            {color_id: all_colors[color_id] for color_id in color_ids[po_id]},
+            {
+                pair: {
+                    'material': all_masters[pair[0]] if pair[0] is not None else None,
+                    'color': all_masters[pair[1]],
+                }
+                for pair in pair_ids[po_id]
+            },
             results[po_id],
             shipments[po_id],
             last[po_id],
@@ -842,38 +930,57 @@ def ubah_po_invoice(invoice, submitted, user):
 
 
 @transaction.atomic
-def simpan_hasil(po, color, pcs, user):
+def simpan_hasil(po, color, pcs, user, material=None):
     require_purchasing(user)
     po = Po.objects.select_for_update().get(pk=po.pk)
-    if not po_rolls(po).filter(color=color).exists():
-        raise ValidationError('Warna belum memiliki roll di PO ini.')
+    material = production_material(po, color, material)
+    require_mapped_production(po, color)
     if not isinstance(pcs, int) or isinstance(pcs, bool) or pcs < 0:
         raise ValidationError('Hasil harus bilangan bulat tidak negatif.')
     shipped = (
-        KirimGudang.objects.filter(po=po, color=color).aggregate(total=Sum('pcs'))['total'] or 0
+        KirimGudang.objects.filter(po=po, material=material, color=color).aggregate(
+            total=Sum('pcs')
+        )['total']
+        or 0
     )
     if pcs < shipped:
         raise ValidationError(
-            f'Hasil {color.name} tidak boleh lebih kecil dari total kiriman {shipped} pcs.'
+            f'Hasil {material.name} / {color.name} '
+            f'tidak boleh lebih kecil dari total kiriman {shipped} pcs.'
         )
-    before = Hasil.objects.filter(po=po, color=color).values_list('pcs', flat=True).first()
+    before = (
+        Hasil.objects.filter(po=po, material=material, color=color)
+        .values_list('pcs', flat=True)
+        .first()
+    )
     if before == pcs:
-        return Hasil.objects.get(po=po, color=color)
-    hasil, _ = Hasil.objects.update_or_create(po=po, color=color, defaults={'pcs': pcs})
+        return Hasil.objects.get(po=po, material=material, color=color)
+    hasil, _ = Hasil.objects.update_or_create(
+        po=po, material=material, color=color, defaults={'pcs': pcs}
+    )
     log(
         user,
         'hasil',
         po.nomor,
-        f'{color.name}: {before if before is not None else "belum diisi"} → {pcs} pcs',
+        f'{material.name} / {color.name}: '
+        f'{before if before is not None else "belum diisi"} → {pcs} pcs',
     )
     return hasil
 
 
 @transaction.atomic
-def kirim_gudang(po, color, data, user):
+def kirim_gudang(po, color, data, user, material=None):
     require_purchasing(user)
     po = Po.objects.select_for_update().get(pk=po.pk)
     payload = dict(data)
+    payload_material = payload.pop('material', None)
+    if material is None:
+        material = payload_material
+    elif payload_material is not None:
+        other_material = production_material(po, color, payload_material)
+        if production_material(po, color, material).pk != other_material.pk:
+            raise ValidationError('Pilihan bahan kiriman tidak konsisten.')
+    material = production_material(po, color, material)
     request_id = payload.pop('request_id', None)
     if request_id == '':
         request_id = None
@@ -885,27 +992,36 @@ def kirim_gudang(po, color, data, user):
         if previous:
             if (
                 previous.po_id != po.pk
+                or previous.material_id != material.pk
                 or previous.color_id != color.pk
                 or any(getattr(previous, key) != value for key, value in payload.items())
             ):
                 raise ValidationError('Identitas permintaan sudah digunakan untuk kiriman berbeda.')
             return previous
-    if not po_rolls(po).filter(color=color).exists():
-        raise ValidationError('Warna belum memiliki roll di PO ini.')
+    require_mapped_production(po, color)
     valid_date(payload['tanggal'], 'Tanggal kirim gudang')
     pcs = payload['pcs']
     if not isinstance(pcs, int) or isinstance(pcs, bool) or pcs <= 0:
         raise ValidationError('Jumlah pcs harus bilangan bulat lebih dari 0.')
-    hasil = Hasil.objects.filter(po=po, color=color).values_list('pcs', flat=True).first()
+    hasil = (
+        Hasil.objects.filter(po=po, material=material, color=color)
+        .values_list('pcs', flat=True)
+        .first()
+    )
     if hasil is None:
-        raise ValidationError(f'Isi hasil produksi {color.name} sebelum mencatat kiriman.')
+        raise ValidationError(
+            f'Isi hasil produksi {material.name} / {color.name} sebelum mencatat kiriman.'
+        )
     shipped = (
-        KirimGudang.objects.filter(po=po, color=color).aggregate(total=Sum('pcs'))['total'] or 0
+        KirimGudang.objects.filter(po=po, material=material, color=color).aggregate(
+            total=Sum('pcs')
+        )['total']
+        or 0
     )
     remaining = max(hasil - shipped, 0)
     if pcs > remaining:
         raise ValidationError(
-            f'Kiriman {pcs} pcs melebihi sisa {color.name} {remaining} pcs '
+            f'Kiriman {pcs} pcs melebihi sisa {material.name} / {color.name} {remaining} pcs '
             f'(hasil {hasil}, terkirim {shipped}).'
         )
     gudang = payload.get('gudang')
@@ -914,14 +1030,54 @@ def kirim_gudang(po, color, data, user):
     try:
         with transaction.atomic():
             shipment = KirimGudang.objects.create(
-                po=po, color=color, request_id=request_id, **payload
+                po=po, material=material, color=color, request_id=request_id, **payload
             )
     except IntegrityError:
         if request_id and KirimGudang.objects.filter(request_id=request_id).exists():
             raise ValidationError('Identitas permintaan sudah digunakan untuk kiriman berbeda.')
         raise
-    log(user, 'kirim gudang', po.nomor, f'{color.name}: {pcs} pcs; {payload["tanggal"]}')
+    log(
+        user,
+        'kirim gudang',
+        po.nomor,
+        f'{material.name} / {color.name}: {pcs} pcs; {payload["tanggal"]}',
+    )
     return shipment
+
+
+@transaction.atomic
+def map_legacy_production(po, color, material, user):
+    require_purchasing(user)
+    po = Po.objects.select_for_update().get(pk=po.pk)
+    if material is None:
+        raise ValidationError('Pilih bahan tujuan untuk data hasil/kiriman lama.')
+    material = production_material(po, color, material)
+    legacy_results = Hasil.objects.filter(po=po, color=color, material=None)
+    legacy_shipments = KirimGudang.objects.filter(po=po, color=color, material=None)
+    result_count, shipment_count = legacy_results.count(), legacy_shipments.count()
+    existing_result = Hasil.objects.filter(po=po, color=color, material=material).exists()
+    existing_shipments = KirimGudang.objects.filter(po=po, color=color, material=material).exists()
+    if not result_count and not shipment_count:
+        if existing_result or existing_shipments:
+            return {'hasil': 0, 'kiriman': 0, 'already_mapped': True}
+        raise ValidationError('Tidak ada data hasil/kiriman lama untuk warna ini.')
+    if existing_result or existing_shipments:
+        raise ValidationError(
+            f'{material.name} / {color.name} sudah memiliki hasil atau kiriman. '
+            'Data lama tidak dapat digabung atau menimpa transaksi tersebut.'
+        )
+    result_pcs = legacy_results.aggregate(total=Sum('pcs'))['total'] or 0
+    shipment_pcs = legacy_shipments.aggregate(total=Sum('pcs'))['total'] or 0
+    legacy_results.update(material=material)
+    legacy_shipments.update(material=material)
+    log(
+        user,
+        'petakan bahan produksi',
+        po.nomor,
+        f'{color.name}: bahan belum dipetakan → {material.name}; '
+        f'{result_count} hasil ({result_pcs} pcs), {shipment_count} kiriman ({shipment_pcs} pcs)',
+    )
+    return {'hasil': result_count, 'kiriman': shipment_count, 'already_mapped': False}
 
 
 def selesaikan_po(po, user):
@@ -929,6 +1085,6 @@ def selesaikan_po(po, user):
     # Retained as an import-compatible check; manual completion no longer changes data.
     if not po_balance(po):
         raise ValidationError(
-            'PO belum Done; status dihitung otomatis dari hasil dan kiriman per warna.'
+            'PO belum Done; status dihitung otomatis dari hasil dan kiriman per bahan dan warna.'
         )
     return po

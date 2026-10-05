@@ -42,6 +42,7 @@ from .services import (
     kirim_alokasi_legacy,
     kirim_gudang,
     log,
+    map_legacy_production,
     pindah_status,
     po_rolls,
     po_status,
@@ -185,7 +186,9 @@ def dashboard(request):
             'waiting': waiting[:5],
             'unbalanced': unbalanced[:5],
             'remaining_pcs': sum(po.summary['remaining'] for po in pos),
-            'incomplete_count': sum(bool(po.summary['missing_results']) for po in pos),
+            'incomplete_count': sum(
+                bool(po.summary['missing_results']) or po.summary['unmapped_material'] for po in pos
+            ),
         },
     )
 
@@ -1079,30 +1082,47 @@ def po_legacy_list(request):
 def po_rows(po, rolls):
     shipments = defaultdict(dict)
     dates = set()
-    for item in KirimGudang.objects.filter(po=po).select_related('color'):
-        shipments[item.color_id][item.tanggal] = (
-            shipments[item.color_id].get(item.tanggal, 0) + item.pcs
-        )
+    for item in KirimGudang.objects.filter(po=po).select_related('material', 'color'):
+        pair = (item.material_id, item.color_id)
+        shipments[pair][item.tanggal] = shipments[pair].get(item.tanggal, 0) + item.pcs
         dates.add(item.tanggal)
     summary = getattr(po, 'summary', None) or po_status(po)
+    source_materials = defaultdict(dict)
+    for roll in rolls:
+        source_materials[roll.color_id][roll.material_id] = roll.material
     rows = []
     for status in summary['rows']:
+        material_id = status['material_id']
         color_id = status['color_id']
-        selected = [roll for roll in rolls if roll.color_id == color_id]
-        total_yard = sum((roll.yard for roll in selected), 0)
+        is_legacy = material_id is None
+        selected = [
+            roll for roll in rolls if roll.material_id == material_id and roll.color_id == color_id
+        ]
+        total_yard = None if is_legacy else sum((roll.yard for roll in selected), 0)
         rows.append(
             {
                 **status,
+                'row_key': f'{material_id or "legacy"}-{color_id}',
+                'is_legacy': is_legacy,
+                'material_label': (
+                    'Bahan belum ditentukan' if is_legacy else status['material'].name
+                ),
+                'mapping_materials': sorted(
+                    source_materials[color_id].values(),
+                    key=lambda material: material.name.casefold(),
+                ),
                 'invoices': ', '.join(dict.fromkeys(roll.invoice.nomor for roll in selected)),
                 'surat_jalan': ', '.join(
                     dict.fromkeys(
                         roll.invoice.surat_jalan for roll in selected if roll.invoice.surat_jalan
                     )
                 ),
-                'rolls': len(selected),
+                'rolls': None if is_legacy else len(selected),
                 'yard': total_yard,
-                'sent': shipments[color_id],
-                'pemakaian': hitung_pemakaian(total_yard, status['hasil'] or 0),
+                'sent': shipments[(material_id, color_id)],
+                'pemakaian': (
+                    None if is_legacy else hitung_pemakaian(total_yard, status['hasil'] or 0)
+                ),
             }
         )
     return rows, sorted(dates)
@@ -1140,9 +1160,21 @@ def po_detail(request, pk):
                         )
             elif action == 'hasil':
                 color = get_object_or_404(Master, pk=request.POST.get('color'), kind='color')
-                simpan_hasil(po, color, input_pcs(request.POST.get('pcs')), request.user)
+                material = (
+                    get_object_or_404(Master, pk=request.POST.get('material'), kind='material')
+                    if request.POST.get('material')
+                    else None
+                )
+                simpan_hasil(
+                    po, color, input_pcs(request.POST.get('pcs')), request.user, material=material
+                )
             elif action == 'kirim':
                 color = get_object_or_404(Master, pk=request.POST.get('color'), kind='color')
+                material = (
+                    get_object_or_404(Master, pk=request.POST.get('material'), kind='material')
+                    if request.POST.get('material')
+                    else None
+                )
                 warehouse_id = request.POST.get('gudang')
                 warehouse = None
                 if warehouse_id:
@@ -1161,7 +1193,16 @@ def po_detail(request, pk):
                         'request_id': request.POST.get('request_id') or None,
                     },
                     request.user,
+                    material=material,
                 )
+            elif action == 'map_material':
+                color = get_object_or_404(Master, pk=request.POST.get('color'), kind='color')
+                if not request.POST.get('material'):
+                    raise ValidationError('Pilih bahan untuk hasil dan kiriman lama.')
+                material = get_object_or_404(
+                    Master, pk=request.POST.get('material'), kind='material'
+                )
+                map_legacy_production(po, color, material, request.user)
             else:
                 raise ValidationError('Aksi PO tidak dikenal.')
             messages.success(request, 'PO diperbarui.')
@@ -1176,7 +1217,7 @@ def po_detail(request, pk):
     rolls = list(
         po_rolls(po)
         .select_related('invoice', 'material', 'color', 'alokasi__cmt')
-        .order_by('color__name', 'invoice__nomor', 'urut')
+        .order_by('material__name', 'color__name', 'invoice__nomor', 'urut')
     )
     po.summary = po_status(po)
     rows, dates = po_rows(po, rolls)
@@ -1186,11 +1227,12 @@ def po_detail(request, pk):
             if detail_error
             and action == 'hasil'
             and str(row['color_id']) == request.POST.get('color')
+            and str(row['material_id']) == request.POST.get('material')
             else row['hasil']
         )
     totals = {
-        'rolls': sum(row['rolls'] for row in rows),
-        'yard': sum((row['yard'] for row in rows), 0),
+        'rolls': sum(row['rolls'] or 0 for row in rows),
+        'yard': sum((row['yard'] or 0 for row in rows), 0),
         'hasil': po.summary['hasil'],
         'sent': {date: sum(row['sent'].get(date, 0) for row in rows) for date in dates},
         'shipped': po.summary['terkirim'],
@@ -1212,11 +1254,19 @@ def po_detail(request, pk):
             'balance': po.summary['is_done'],
             'form': form,
             'colors': [row['color'] for row in rows],
+            'production_materials': sorted(
+                {
+                    row['material_id']: row['material'] for row in rows if row['material_id']
+                }.values(),
+                key=lambda material: material.name.casefold(),
+            ),
+            'shipment_rows': [row for row in rows if row['material_id'] is not None],
+            'legacy_rows': [row for row in rows if row['is_legacy']],
             'warehouses': Master.objects.filter(kind='warehouse', active=True),
             'tgl_masuk': min((roll.tgl_terima for roll in rolls if roll.tgl_terima), default=None),
             'materials': ', '.join(dict.fromkeys(roll.material.name for roll in rolls)),
             'shipments': KirimGudang.objects.filter(po=po)
-            .select_related('color', 'gudang')
+            .select_related('material', 'color', 'gudang')
             .order_by('-tanggal', '-id'),
             'request_id': request.POST.get('request_id') or uuid4().hex,
             'posted': request.POST if detail_error else {},
@@ -1406,7 +1456,7 @@ def invoice_export(request, pk):
 def po_export(request, pk):
     po = get_object_or_404(Po.objects.select_related('cmt'), pk=pk)
     po.summary = po_status(po)
-    rolls = list(po_rolls(po).select_related('invoice', 'color'))
+    rolls = list(po_rolls(po).select_related('invoice', 'material', 'color'))
     rows, dates = po_rows(po, rolls)
     return download_xlsx(
         f'po-{pk}',
@@ -1419,6 +1469,7 @@ def po_export(request, pk):
             'Status PO',
             'Invoice sumber',
             'Surat jalan invoice',
+            'Bahan',
             'Warna',
             'Roll',
             'Total yard alokasi',
@@ -1426,7 +1477,7 @@ def po_export(request, pk):
             'Total terkirim (pcs)',
             'Sisa kirim (pcs)',
             'Lebih kirim (pcs)',
-            'Status warna',
+            'Status bahan / warna',
             *[date.isoformat() for date in dates],
             'Pemakaian (yard/pcs)',
         ],
@@ -1440,6 +1491,7 @@ def po_export(request, pk):
                 po.summary['label'],
                 row['invoices'],
                 row['surat_jalan'],
+                row['material_label'],
                 row['color'].name,
                 row['rolls'],
                 row['yard'],
@@ -1449,7 +1501,7 @@ def po_export(request, pk):
                 row['over'],
                 row['status_label'],
                 *[row['sent'].get(date, 0) for date in dates],
-                row['pemakaian'] if row['pemakaian'] else '',
+                row['pemakaian'] if row['pemakaian'] is not None else '',
             ]
             for row in rows
         ],

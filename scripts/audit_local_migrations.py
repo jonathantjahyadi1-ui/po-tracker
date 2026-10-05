@@ -44,6 +44,8 @@ def snapshot(path):
             ]
             if table == 'tracking_alokasi':
                 columns = [name for name in columns if name not in ('tgl_kirim', 'sj_kirim')]
+            if table in ('tracking_hasil', 'tracking_kirimgudang'):
+                columns = [name for name in columns if name != 'material_id']
             if table == 'tracking_alokasi' and 'cmt_id' not in columns:
                 columns.append('cmt_id')
             rows = db.execute(f'SELECT {",".join(columns)} FROM {table} ORDER BY id').fetchall()

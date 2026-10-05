@@ -245,15 +245,30 @@ class AlokasiRoll(Dated):
 
 class Hasil(Dated):
     po = models.ForeignKey(Po, on_delete=models.PROTECT)
+    material = models.ForeignKey(
+        Master, on_delete=models.PROTECT, related_name='+', null=True, blank=True
+    )
     color = models.ForeignKey(Master, on_delete=models.PROTECT)
     pcs = models.PositiveIntegerField(default=0)
 
     class Meta:
-        constraints = [models.UniqueConstraint(fields=['po', 'color'], name='hasil_po_color')]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['po', 'material', 'color'], name='hasil_po_material_color'
+            ),
+            models.UniqueConstraint(
+                fields=['po', 'color'],
+                condition=Q(material__isnull=True),
+                name='hasil_po_color_legacy',
+            ),
+        ]
 
 
 class KirimGudang(Dated):
     po = models.ForeignKey(Po, on_delete=models.PROTECT)
+    material = models.ForeignKey(
+        Master, on_delete=models.PROTECT, related_name='+', null=True, blank=True
+    )
     color = models.ForeignKey(Master, on_delete=models.PROTECT, related_name='+')
     tanggal = models.DateField()
     pcs = models.PositiveIntegerField()
@@ -266,7 +281,10 @@ class KirimGudang(Dated):
 
     class Meta:
         constraints = [models.CheckConstraint(condition=Q(pcs__gt=0), name='kirim_pcs_positive')]
-        indexes = [models.Index(fields=['po', 'color'])]
+        indexes = [
+            models.Index(fields=['po', 'color']),
+            models.Index(fields=['po', 'material', 'color']),
+        ]
 
 
 class Log(Dated):

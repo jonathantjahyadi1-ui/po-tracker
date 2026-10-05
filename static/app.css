@@ -370,3 +370,9 @@ dialog[open] { animation:panel-enter var(--motion-panel) ease-out; }
 }
 .file-label:focus-within { outline:2px solid var(--accent); outline-offset:2px; }
 #groups[data-edit=true] > [data-group]:only-child [data-remove-group] { display:inline-flex; }
+.legacy-production-row { background:var(--warn-soft); }
+.legacy-production-mapping { display:flex; align-items:end; justify-content:space-between; flex-wrap:wrap; gap:16px; padding:18px 0; border-bottom:1px solid var(--line); }
+.legacy-production-mapping:last-child { border-bottom:0; padding-bottom:0; }
+.legacy-material-form { display:flex; align-items:end; flex-wrap:wrap; gap:12px; }
+.legacy-material-form .field { min-width:200px; }
+@media(max-width:640px) { .legacy-material-form,.legacy-material-form .field,.legacy-material-form .button { width:100%; } }

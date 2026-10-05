@@ -399,32 +399,69 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
+  const shipMaterial = document.getElementById('ship-material');
   const shipColor = document.getElementById('ship-color');
   const shipPcs = document.getElementById('ship-pcs');
   const shipmentContext = document.getElementById('ship-context');
+  const filterShipmentColors = (reset = false) => {
+    if (!shipMaterial || !shipColor) return;
+    const selected = shipColor.selectedOptions[0];
+    [...shipColor.options].forEach(option => {
+      if (!option.value) return;
+      const matches = option.dataset.material === shipMaterial.value;
+      option.hidden = !matches;
+      option.disabled = !matches || option.dataset.unmapped === 'true';
+      option.textContent = option.dataset.colorLabel + (option.dataset.unmapped === 'true' ?
+        ' · tentukan bahan data lama' : '');
+    });
+    shipColor.disabled = !shipMaterial.value;
+    if (reset || !selected?.value || selected.dataset.material !== shipMaterial.value)
+      shipColor.selectedIndex = 0;
+    else shipColor.selectedIndex = [...shipColor.options].indexOf(selected);
+  };
   const updateShipment = () => {
     const option = shipColor?.selectedOptions[0];
     const submit = shipColor?.closest('form').querySelector('button[type=submit]');
+    const showLegacyHelp = () => {
+      shipmentContext.replaceChildren(document.createTextNode('Tentukan bahan data lama terlebih dahulu. '));
+      const link = document.createElement('a');
+      link.href = '#bahan-data-lama';
+      link.textContent = 'Buka penentuan bahan';
+      shipmentContext.append(link);
+      shipPcs.disabled = true;
+      if (submit) submit.disabled = true;
+    };
     if (!option?.value) {
       shipPcs?.removeAttribute('max');
-      if (shipPcs) shipPcs.disabled = false;
-      if (submit) submit.disabled = false;
-      if (shipmentContext) shipmentContext.textContent = 'Pilih warna untuk melihat hasil, total terkirim, dan sisa sebelum mencatat kiriman.';
+      if (shipPcs) shipPcs.disabled = true;
+      if (submit) submit.disabled = true;
+      if (shipmentContext) shipmentContext.textContent = 'Pilih bahan dan warna untuk melihat hasil, total terkirim, dan sisa sebelum mencatat kiriman.';
+      const choices = shipMaterial?.value ? [...shipColor.options].filter(item =>
+        item.value && item.dataset.material === shipMaterial.value) : [];
+      if (choices.length && choices.every(item => item.dataset.unmapped === 'true')) showLegacyHelp();
       return;
     }
+    if (option.dataset.unmapped === 'true') { showLegacyHelp(); return; }
     if (option.dataset.hasil === '') {
-      shipmentContext.textContent = 'Hasil warna ini belum diisi. Catat total hasil produksi terlebih dahulu.';
+      shipmentContext.textContent = 'Hasil untuk bahan dan warna ini belum diisi. Catat total hasil produksi pasangan ini terlebih dahulu.';
       shipPcs.disabled = true;
       if (submit) submit.disabled = true;
     } else {
       const remaining = Number(option.dataset.remaining);
-      shipmentContext.textContent = `Hasil ${option.dataset.hasil} pcs · sudah terkirim ${option.dataset.shipped} pcs · sisa kirim ${remaining} pcs.`;
+      const materialLabel = shipMaterial?.selectedOptions[0]?.textContent || '';
+      shipmentContext.textContent = `${materialLabel} / ${option.dataset.colorLabel} · hasil ${option.dataset.hasil} pcs · sudah terkirim ${option.dataset.shipped} pcs · sisa kirim ${remaining} pcs.`;
       shipPcs.disabled = remaining === 0; shipPcs.max = remaining;
       if (submit) submit.disabled = remaining === 0;
       if (remaining === 0) shipmentContext.textContent += ' Seluruh hasil tercatat sudah dikirim.';
     }
   };
-  shipColor?.addEventListener('change', updateShipment); if (shipColor) updateShipment();
+  shipMaterial?.addEventListener('change', () => {
+    filterShipmentColors(true);
+    if (shipPcs) shipPcs.value = '';
+    updateShipment();
+  });
+  shipColor?.addEventListener('change', updateShipment);
+  if (shipColor) { filterShipmentColors(); updateShipment(); }
 
   document.querySelectorAll('[data-submit-form]').forEach(form => {
     form.addEventListener('submit', event => {

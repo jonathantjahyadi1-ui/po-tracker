@@ -76,6 +76,8 @@ class Command(BaseCommand):
             'totals': totals,
             'unmapped_pos': unmapped,
             'rolls_without_material_row': Roll.objects.filter(invoice_color=None).count(),
+            'results_without_material': Hasil.objects.filter(material=None).count(),
+            'shipments_without_material': KirimGudang.objects.filter(material=None).count(),
             'legacy_ready_to_ship': list(
                 Roll.objects.filter(status='siap_kirim').values_list('pk', flat=True)
             ),
@@ -86,7 +88,9 @@ class Command(BaseCommand):
             ),
             'over_shipped_pos': [po_id for po_id, summary in statuses.items() if summary['over']],
             'results_incomplete_pos': [
-                po_id for po_id, summary in statuses.items() if summary['missing_results']
+                po_id
+                for po_id, summary in statuses.items()
+                if summary['missing_results'] or summary['unmapped_material']
             ],
             'status_counts': {
                 key: sum(item['code'] == key for item in statuses.values())

@@ -37,6 +37,7 @@ from .services import (
     ajukan_alokasi,
     done,
     kirim_gudang,
+    map_legacy_production,
     pemakaian,
     pindah_status,
     po_balance,
@@ -447,8 +448,13 @@ class WorkflowTests(TestCase):
         simpan_hasil(po, self.color, 100, self.user)
         simpan_hasil(po, blue, 100, self.user)
         # Direct insertion represents retained legacy anomalies, bypassing new-write validation.
-        KirimGudang.objects.create(po=po, color=self.color, tanggal=self.today, pcs=90)
-        KirimGudang.objects.create(po=po, color=blue, tanggal=self.today, pcs=110)
+        material = self.rolls[0].material
+        KirimGudang.objects.create(
+            po=po, material=material, color=self.color, tanggal=self.today, pcs=90
+        )
+        KirimGudang.objects.create(
+            po=po, material=material, color=blue, tanggal=self.today, pcs=110
+        )
         state = po_status(po)
         self.assertEqual((state['hasil'], state['terkirim']), (200, 200))
         self.assertEqual(
@@ -985,8 +991,13 @@ class WorkflowTests(TestCase):
         self.assertEqual({row['Status PO'] for row in data.values()}, {'Belum lengkap'})
         simpan_hasil(po, self.color, 100, self.user)
         simpan_hasil(po, blue, 100, self.user)
-        KirimGudang.objects.create(po=po, color=self.color, tanggal=self.today, pcs=90)
-        KirimGudang.objects.create(po=po, color=blue, tanggal=self.today, pcs=110)
+        material = self.rolls[0].material
+        KirimGudang.objects.create(
+            po=po, material=material, color=self.color, tanggal=self.today, pcs=90
+        )
+        KirimGudang.objects.create(
+            po=po, material=material, color=blue, tanggal=self.today, pcs=110
+        )
         data = records()
         self.assertEqual(data['Cream']['Sisa kirim (pcs)'], 10)
         self.assertEqual(data['Blue']['Lebih kirim (pcs)'], 10)
@@ -1112,11 +1123,315 @@ class ConcurrencyTests(TransactionTestCase):
         self.assertEqual(po_status(po)['remaining'], 50)
 
 
+@override_settings(PASSWORD_HASHERS=['django.contrib.auth.hashers.MD5PasswordHasher'])
+class MaterialProductionTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username='material-buyer', role='purchasing')
+        self.director = User.objects.create_user(username='material-director', role='direktur')
+        self.cmt = Master.objects.create(kind='cmt', name='CMT Bahan')
+        self.today = timezone.localdate()
+        self.invoice = simpan_invoice(
+            {
+                'vendor': 'Vendor Bahan',
+                'nomor': 'INV-MATERIAL',
+                'tanggal': self.today,
+                'total_rp': Decimal(1000),
+                'surat_jalan': 'SJ-MATERIAL',
+            },
+            [
+                {'material': 'Cotton', 'rows': [{'color': 'Cream', 'yards': [Decimal(80)]}]},
+                {'material': 'Polyester', 'rows': [{'color': 'Cream', 'yards': [Decimal(90)]}]},
+            ],
+            self.user,
+        )
+        rolls = list(self.invoice.roll_set.select_related('material', 'color').order_by('pk'))
+        self.cotton, self.polyester, self.color = (
+            rolls[0].material,
+            rolls[1].material,
+            rolls[0].color,
+        )
+        ids = [roll.pk for roll in rolls]
+        allocation = ajukan_alokasi(ids, self.cmt, self.user)
+        putuskan_alokasi(allocation, 'acc', self.user, tgl_kirim=self.today)
+        terima_alokasi(allocation, ids, self.today, self.user)
+        self.po = tautkan_po(allocation, 'PO MATERIAL', self.user)
+        self.client.force_login(self.user)
+
+    def result(self, material, pcs):
+        return simpan_hasil(self.po, self.color, pcs, self.user, material=material)
+
+    def ship(self, material, pcs, identity=None):
+        return kirim_gudang(
+            self.po,
+            self.color,
+            {'tanggal': self.today, 'pcs': pcs, 'request_id': identity or str(uuid4())},
+            self.user,
+            material=material,
+        )
+
+    def rows(self):
+        return {(row['material_id'], row['color_id']): row for row in po_status(self.po)['rows']}
+
+    def export_rows(self):
+        response = self.client.get(reverse('po_export', args=[self.po.pk]))
+        self.assertEqual(response.status_code, 200)
+        book = load_workbook(BytesIO(response.content), read_only=True)
+        values = list(book.active.values)
+        rows = [dict(zip(values[0], row)) for row in values[1:]]
+        book.close()
+        return rows
+
+    def test_same_color_material_results_and_limits_are_independent(self):
+        self.result(self.cotton, 200)
+        self.result(self.polyester, 70)
+        self.ship(self.cotton, 150)
+        self.ship(self.polyester, 40)
+        rows = self.rows()
+        self.assertEqual(
+            (
+                rows[(self.cotton.pk, self.color.pk)]['hasil'],
+                rows[(self.cotton.pk, self.color.pk)]['shipped'],
+                rows[(self.cotton.pk, self.color.pk)]['remaining'],
+            ),
+            (200, 150, 50),
+        )
+        self.assertEqual(
+            (
+                rows[(self.polyester.pk, self.color.pk)]['hasil'],
+                rows[(self.polyester.pk, self.color.pk)]['shipped'],
+                rows[(self.polyester.pk, self.color.pk)]['remaining'],
+            ),
+            (70, 40, 30),
+        )
+        self.assertEqual(
+            (
+                po_status(self.po)['hasil'],
+                po_status(self.po)['terkirim'],
+                po_status(self.po)['remaining'],
+            ),
+            (270, 190, 80),
+        )
+        self.assertEqual(yard_po(self.po, self.color, material=self.cotton), Decimal(80))
+        self.assertEqual(yard_po(self.po, self.color, material=self.polyester), Decimal(90))
+        self.assertEqual(done(self.po, self.color, material=self.cotton), 50)
+        self.assertEqual(done(self.po, self.color, material=self.polyester), 30)
+        self.assertEqual(pemakaian(self.po, self.color, material=self.cotton), Decimal('0.40'))
+        self.assertEqual(pemakaian(self.po, self.color, material=self.polyester), Decimal('1.29'))
+        with self.assertRaises(ValidationError):
+            self.ship(self.polyester, 31)
+        with self.assertRaises(ValidationError):
+            self.result(self.polyester, 39)
+        self.result(self.cotton, 230)
+        self.assertEqual(Hasil.objects.get(po=self.po, material=self.polyester).pcs, 70)
+        self.assertEqual(po_status(self.po)['remaining'], 110)
+        self.assertEqual(KirimGudang.objects.filter(po=self.po).count(), 2)
+
+    def test_ambiguous_and_unrelated_material_selection_rejected(self):
+        with self.assertRaises(ValidationError):
+            simpan_hasil(self.po, self.color, 10, self.user)
+        with self.assertRaises(ValidationError):
+            kirim_gudang(self.po, self.color, {'tanggal': self.today, 'pcs': 1}, self.user)
+        alien = Master.objects.create(kind='material', name='Bahan lain')
+        with self.assertRaises(ValidationError):
+            self.result(alien, 10)
+        with self.assertRaises(ValidationError):
+            self.result(self.color, 10)
+        response = self.client.post(
+            reverse('po_detail', args=[self.po.pk]),
+            {'action': 'hasil', 'color': self.color.pk, 'pcs': '10'},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.context['detail_error'])
+        self.assertFalse(Hasil.objects.filter(po=self.po).exists())
+        self.assertFalse(KirimGudang.objects.filter(po=self.po).exists())
+
+    def test_all_pairs_needed_for_done_and_result_increase_reopens(self):
+        self.result(self.cotton, 200)
+        self.result(self.polyester, 70)
+        self.ship(self.cotton, 200)
+        self.assertEqual(self.rows()[(self.cotton.pk, self.color.pk)]['status_label'], 'Done')
+        self.assertFalse(po_status(self.po)['is_done'])
+        self.assertEqual(po_status(self.po)['remaining'], 70)
+        self.ship(self.polyester, 70)
+        self.assertTrue(po_status(self.po)['is_done'])
+        self.result(self.cotton, 230)
+        self.assertEqual(po_status(self.po)['remaining'], 30)
+        self.assertFalse(po_status(self.po)['is_done'])
+
+    def test_same_color_excess_cannot_cancel_other_material_shortage(self):
+        self.result(self.cotton, 100)
+        self.result(self.polyester, 100)
+        KirimGudang.objects.create(
+            po=self.po, material=self.cotton, color=self.color, tanggal=self.today, pcs=90
+        )
+        KirimGudang.objects.create(
+            po=self.po, material=self.polyester, color=self.color, tanggal=self.today, pcs=110
+        )
+        summary = po_status(self.po)
+        self.assertEqual((summary['hasil'], summary['terkirim']), (200, 200))
+        self.assertEqual((summary['remaining'], summary['over']), (10, 10))
+        self.assertEqual(summary['label'], 'Lebih kirim')
+        self.assertFalse(summary['is_done'])
+
+    def test_shipment_replay_identity_is_bound_to_material(self):
+        self.result(self.cotton, 100)
+        self.result(self.polyester, 100)
+        identity = str(uuid4())
+        original = self.ship(self.cotton, 40, identity)
+        logs = Log.objects.count()
+        self.assertEqual(self.ship(self.cotton, 40, identity).pk, original.pk)
+        self.assertEqual(Log.objects.count(), logs)
+        with self.assertRaises(ValidationError):
+            self.ship(self.polyester, 40, identity)
+        other = self.ship(self.polyester, 40)
+        self.assertNotEqual(original.pk, other.pk)
+        self.assertEqual(KirimGudang.objects.filter(po=self.po).count(), 2)
+        self.assertEqual({row['shipped'] for row in self.rows().values()}, {40})
+
+    def test_http_table_history_and_excel_split_same_color_materials(self):
+        detail = reverse('po_detail', args=[self.po.pk])
+        for material, hasil, sent in ((self.cotton, 200, 150), (self.polyester, 70, 40)):
+            result = self.client.post(
+                detail,
+                {'action': 'hasil', 'material': material.pk, 'color': self.color.pk, 'pcs': hasil},
+            )
+            self.assertEqual(result.status_code, 302)
+            self.assertEqual(
+                self.client.post(
+                    detail,
+                    {
+                        'action': 'kirim',
+                        'material': material.pk,
+                        'color': self.color.pk,
+                        'tanggal': self.today.isoformat(),
+                        'pcs': sent,
+                        'request_id': str(uuid4()),
+                    },
+                ).status_code,
+                302,
+            )
+        page = self.client.get(detail)
+        rows = {row['material_id']: row for row in page.context['rows']}
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(
+            (rows[self.cotton.pk]['rolls'], rows[self.cotton.pk]['yard']), (1, Decimal(80))
+        )
+        self.assertEqual(
+            (rows[self.polyester.pk]['rolls'], rows[self.polyester.pk]['yard']), (1, Decimal(90))
+        )
+        self.assertEqual(rows[self.cotton.pk]['sent'][self.today], 150)
+        self.assertEqual(rows[self.polyester.pk]['sent'][self.today], 40)
+        for material in (self.cotton, self.polyester):
+            self.assertContains(page, f'id="hasil-{material.pk}-{self.color.pk}"')
+        exported = {row['Bahan']: row for row in self.export_rows()}
+        for material, hasil, sent, sisa, yard in (
+            (self.cotton, 200, 150, 50, 80),
+            (self.polyester, 70, 40, 30, 90),
+        ):
+            row = exported[material.name]
+            self.assertEqual(
+                (
+                    row['Hasil produksi (pcs)'],
+                    row['Total terkirim (pcs)'],
+                    row['Sisa kirim (pcs)'],
+                    row['Total yard alokasi'],
+                ),
+                (hasil, sent, sisa, yard),
+            )
+            self.assertEqual(row[self.today.isoformat()], sent)
+            self.assertEqual(row['Invoice sumber'], self.invoice.nomor)
+        self.assertEqual(sum(row['Hasil produksi (pcs)'] for row in exported.values()), 270)
+
+    def test_ambiguous_legacy_totals_count_once_then_map_explicitly(self):
+        historical = Hasil.objects.create(po=self.po, color=self.color, pcs=200)
+        shipment = KirimGudang.objects.create(
+            po=self.po, color=self.color, tanggal=self.today, pcs=150
+        )
+        before = (historical.pk, shipment.pk, historical.pcs, shipment.pcs)
+        summary = po_status(self.po)
+        self.assertTrue(summary['unmapped_material'])
+        self.assertEqual((summary['hasil'], summary['terkirim']), (200, 150))
+        self.assertFalse(summary['is_done'])
+        self.assertEqual(len([row for row in summary['rows'] if row['material_id'] is None]), 1)
+        for material in (self.cotton, self.polyester):
+            with self.assertRaises(ValidationError):
+                self.result(material, 100)
+            with self.assertRaises(ValidationError):
+                self.ship(material, 1)
+        page = self.client.get(reverse('po_detail', args=[self.po.pk]))
+        self.assertContains(page, 'Bahan belum ditentukan')
+        for material in (self.cotton, self.polyester):
+            self.assertContains(page, f'id="hasil-{material.pk}-{self.color.pk}" disabled')
+        legacy = [row for row in page.context['rows'] if row['material_id'] is None]
+        self.assertEqual((legacy[0]['rolls'], legacy[0]['yard']), (None, None))
+        exported = self.export_rows()
+        self.assertEqual(sum(row['Roll'] or 0 for row in exported), 2)
+        self.assertEqual(sum(row['Total yard alokasi'] or 0 for row in exported), 170)
+        self.assertEqual(sum(row['Hasil produksi (pcs)'] or 0 for row in exported), 200)
+        self.assertEqual(sum(row['Total terkirim (pcs)'] or 0 for row in exported), 150)
+        response = self.client.post(
+            reverse('po_detail', args=[self.po.pk]),
+            {
+                'action': 'map_material',
+                'color': self.color.pk,
+                'material': self.cotton.pk,
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+        historical.refresh_from_db()
+        shipment.refresh_from_db()
+        self.assertEqual((historical.pk, shipment.pk, historical.pcs, shipment.pcs), before)
+        self.assertEqual(
+            (historical.material_id, shipment.material_id), (self.cotton.pk, self.cotton.pk)
+        )
+        self.assertFalse(po_status(self.po)['unmapped_material'])
+        self.assertEqual(self.rows()[(self.cotton.pk, self.color.pk)]['remaining'], 50)
+        self.result(self.polyester, 0)
+        self.ship(self.cotton, 50)
+        self.assertTrue(po_status(self.po)['is_done'])
+
+    def test_mapping_rejects_existing_target_and_wrong_role_without_merging_totals(self):
+        historical = Hasil.objects.create(po=self.po, color=self.color, pcs=200)
+        target = Hasil.objects.create(po=self.po, material=self.cotton, color=self.color, pcs=30)
+        shipment = KirimGudang.objects.create(
+            po=self.po, color=self.color, tanggal=self.today, pcs=150
+        )
+        logs = Log.objects.count()
+        with self.assertRaises(ValidationError):
+            map_legacy_production(self.po, self.color, self.cotton, self.user)
+        self.client.force_login(self.director)
+        self.assertEqual(
+            self.client.post(
+                reverse('po_detail', args=[self.po.pk]),
+                {
+                    'action': 'map_material',
+                    'color': self.color.pk,
+                    'material': self.polyester.pk,
+                },
+            ).status_code,
+            403,
+        )
+        historical.refresh_from_db()
+        target.refresh_from_db()
+        shipment.refresh_from_db()
+        self.assertEqual(
+            (
+                historical.material_id,
+                historical.pcs,
+                target.pcs,
+                shipment.material_id,
+                shipment.pcs,
+            ),
+            (None, 200, 30, None, 150),
+        )
+        self.assertEqual(Log.objects.count(), logs)
+
+
 class HistoricalMigrationTests(TransactionTestCase):
     """Conserve real legacy identities and expose unmapped/multi-CMT exceptions."""
 
     migrate_from = [('tracking', '0003_invoicepo_roll_invoice_po_and_more')]
-    migrate_to = [('tracking', '0006_invoice_write_requests')]
+    migrate_to = [('tracking', '0007_production_material')]
 
     def setUp(self):
         executor = MigrationExecutor(connection)
@@ -1272,3 +1587,130 @@ class HistoricalMigrationTests(TransactionTestCase):
         reasons = {item['reason'] for item in audit['unmapped_pos']}
         self.assertEqual(reasons, {'no_cmt', 'multiple_cmt'})
         self.assertEqual(new_roll.objects.get(status='siap_kirim').tgl_kirim, None)
+
+
+class ProductionMaterialMigrationTests(TransactionTestCase):
+    migrate_from = [('tracking', '0006_invoice_write_requests')]
+    migrate_to = [('tracking', '0007_production_material')]
+
+    def setUp(self):
+        executor = MigrationExecutor(connection)
+        executor.migrate(self.migrate_from)
+        self.old = executor.loader.project_state(self.migrate_from).apps
+        self.addCleanup(self.restore_latest)
+
+    def restore_latest(self):
+        executor = MigrationExecutor(connection)
+        executor.migrate(executor.loader.graph.leaf_nodes())
+
+    def test_single_material_maps_and_ambiguous_orphan_records_stay_unassigned(self):
+        def get(name):
+            return self.old.get_model('tracking', name)
+        user = get('User').objects.create(username='production-migration', role='purchasing')
+        vendor = get('Master').objects.create(kind='vendor', name='Migration vendor')
+        cmt = get('Master').objects.create(kind='cmt', name='Migration CMT')
+        cotton = get('Master').objects.create(kind='material', name='Cotton')
+        polyester = get('Master').objects.create(kind='material', name='Polyester')
+        cream = get('Master').objects.create(kind='color', name='Cream')
+        navy = get('Master').objects.create(kind='color', name='Navy')
+        orphan = get('Master').objects.create(kind='color', name='Orphan')
+        today = timezone.localdate()
+        po = get('Po').objects.create(nomor='PO SPLIT MIGRATION', cmt=cmt)
+        invoice = get('Invoice').objects.create(
+            vendor=vendor,
+            nomor='INV SPLIT MIGRATION',
+            tanggal=today,
+            dibuat_oleh=user,
+            total_rp=100,
+        )
+        allocation = get('Alokasi').objects.create(
+            po=po, cmt=cmt, dibuat_oleh=user, status='disetujui'
+        )
+        for index, (material, color, yard) in enumerate(
+            ((cotton, cream, 80), (polyester, cream, 90), (cotton, navy, 100)), 1
+        ):
+            get('Roll').objects.create(
+                invoice=invoice,
+                alokasi=allocation,
+                material=material,
+                color=color,
+                urut=index,
+                yard=yard,
+                status='diterima',
+                tgl_kirim=today,
+                tgl_terima=today,
+            )
+        result_ids, shipment_ids = {}, {}
+        for color, result, shipped in ((cream, 200, 150), (navy, 50, 50), (orphan, 30, 10)):
+            result_ids[color.pk] = get('Hasil').objects.create(po=po, color=color, pcs=result).pk
+            shipment_ids[color.pk] = (
+                get('KirimGudang')
+                .objects.create(
+                    po=po,
+                    color=color,
+                    pcs=shipped,
+                    tanggal=today,
+                    request_id=f'history-{color.pk}',
+                    surat_jalan='SJ-HISTORY',
+                    catatan='Retain',
+                )
+                .pk
+            )
+        # An invoice-only legacy link still gives a deterministic known material.
+        invoice_only_po = get('Po').objects.create(nomor='PO INVOICE ONLY')
+        group = get('InvoicePo').objects.create(invoice=invoice, po=invoice_only_po, urut=1)
+        get('Roll').objects.create(
+            invoice=invoice,
+            invoice_po=group,
+            material=polyester,
+            color=navy,
+            urut=4,
+            yard=Decimal('75.5'),
+        )
+        invoice_only_result = get('Hasil').objects.create(po=invoice_only_po, color=navy, pcs=40)
+        invoice_only_shipment = get('KirimGudang').objects.create(
+            po=invoice_only_po, color=navy, pcs=20, tanggal=today
+        )
+        names = ('Roll', 'Po', 'Invoice', 'InvoicePo', 'Alokasi', 'Hasil', 'KirimGudang')
+        old_fields = {
+            name: [field.attname for field in get(name)._meta.concrete_fields] for name in names
+        }
+        before = {
+            name: list(get(name).objects.order_by('pk').values_list(*old_fields[name]))
+            for name in names
+        }
+        executor = MigrationExecutor(connection)
+        executor.migrate(self.migrate_to)
+        current = executor.loader.project_state(self.migrate_to).apps
+        after = {
+            name: list(
+                current.get_model('tracking', name)
+                .objects.order_by('pk')
+                .values_list(*old_fields[name])
+            )
+            for name in names
+        }
+        self.assertEqual(before, after)
+        result_model = current.get_model('tracking', 'Hasil')
+        shipment_model = current.get_model('tracking', 'KirimGudang')
+        for color in (cream, orphan):
+            self.assertIsNone(result_model.objects.get(pk=result_ids[color.pk]).material_id)
+            self.assertIsNone(shipment_model.objects.get(pk=shipment_ids[color.pk]).material_id)
+        self.assertEqual(result_model.objects.get(pk=result_ids[navy.pk]).material_id, cotton.pk)
+        self.assertEqual(
+            shipment_model.objects.get(pk=shipment_ids[navy.pk]).material_id, cotton.pk
+        )
+        self.assertEqual(
+            result_model.objects.get(pk=invoice_only_result.pk).material_id, polyester.pk
+        )
+        self.assertEqual(
+            shipment_model.objects.get(pk=invoice_only_shipment.pk).material_id, polyester.pk
+        )
+        self.assertEqual((result_model.objects.count(), shipment_model.objects.count()), (4, 4))
+        self.assertEqual(sum(result_model.objects.values_list('pcs', flat=True)), 320)
+        self.assertEqual(sum(shipment_model.objects.values_list('pcs', flat=True)), 230)
+        migration = import_module('tracking.migrations.0007_production_material')
+        with connection.schema_editor() as editor:
+            migration.map_unambiguous_materials(current, editor)
+        self.assertEqual((result_model.objects.count(), shipment_model.objects.count()), (4, 4))
+        self.assertIsNone(result_model.objects.get(pk=result_ids[cream.pk]).material_id)

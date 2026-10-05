@@ -44,15 +44,17 @@ jalankan `manage.py seed_contoh` saat `DEBUG=true`.
    sebagian diperbolehkan. Isi nomor PO setelah seluruh roll dalam pengiriman
    diterima; nama produk opsional juga dikelola di CMT.
 5. Buka **PO → CMT → nomor PO**. Informasi PO hanya mengubah tanggal order.
-   Isi total hasil produksi per warna; angka baru mengganti total sebelumnya.
+   Isi total hasil produksi per pasangan bahan dan warna. Bahan berbeda dengan
+   warna yang sama memiliki isian hasil dan sisa kirim masing-masing; angka baru
+   mengganti total pasangan tersebut sebelumnya.
 6. Tambah transaksi kiriman gudang. Hasil 200 pcs dan kiriman 150 pcs menghasilkan
-   **Kurang kirim 50 pcs**. Tambahan 50 pcs menghasilkan **Done** jika setiap warna
+   **Kurang kirim 50 pcs**. Tambahan 50 pcs menghasilkan **Done** jika setiap pasangan
    sudah lengkap dan seluruh hasilnya terkirim. Hasil yang dinaikkan menjadi 230 pcs
    membuat PO kembali **Kurang kirim 30 pcs**.
 
-Kiriman baru tidak boleh melebihi sisa warna dan hasil tidak boleh dikurangi di
+Kiriman baru tidak boleh melebihi sisa bahan/warna dan hasil tidak boleh dikurangi di
 bawah total kiriman tercatat. Hasil kosong berbeda dari hasil nol. Kelebihan pada
-data lama tetap ditampilkan sebagai anomali per warna; jumlah bersih antarwarna
+data lama tetap ditampilkan sebagai anomali per bahan/warna; jumlah bersih antarpasangan
 tidak dapat membuat PO Done. Tidak ada tombol selesai manual atau panel Roll PO.
 
 File invoice PDF, JPG, atau PNG (maksimal 10 MB) tetap disimpan di database;
@@ -94,11 +96,19 @@ Migrasi revisi mencakup `0004_material_cmt_workflow`, pemetaan histori pada
 `0006_invoice_write_requests`. Ledger mencegah roll baru tergandakan saat POST
 simpan invoice yang sama diulang.
 
+`0007_production_material` memisahkan hasil dan kiriman berdasarkan bahan/warna.
+Total lama otomatis dihubungkan ke bahan hanya jika PO/warna tersebut mempunyai
+satu bahan yang diketahui. Total dengan beberapa kemungkinan bahan tetap utuh
+pada baris **Bahan belum ditentukan**; Purchasing memilih bahan melalui detail PO
+sebelum mengisi atau mengirim pasangan warna tersebut. Tidak ada penyalinan total
+ke setiap bahan. Pilihan tidak dapat menimpa hasil atau kiriman yang sudah dicatat
+untuk pasangan tujuan.
+
 Sebelum rilis, jalankan migrasi pada salinan database aktif dan bandingkan jumlah
 invoice, roll, alokasi, PO, total yard, hasil pcs, kiriman pcs, dan lampiran.
 PO lama tanpa CMT atau dengan beberapa CMT tetap tersedia sebagai data historis;
 pemetaan CMT tidak ditebak. Roll lama Siap kirim perlu pencatatan kirim pertama
-melalui transisi legacy. Revisi ini tidak menjalankan deploy atau migrasi produksi.
+melalui transisi legacy.
 
 ## Pemeriksaan
 
@@ -116,12 +126,13 @@ dibuktikan dengan PostgreSQL. Gunakan PostgreSQL tes terpisah melalui
 yang sisa gabungannya tidak cukup. Jangan gunakan database operasional sebagai
 database tes. Lihat catatan implementasi untuk batas verifikasi yang telah dijalankan.
 
-Verifikasi revisi tanggal 5 Oktober 2026: 57 tes, 52 lulus dan 5 tes khusus
+Verifikasi terbaru tanggal 5 Oktober 2026: 70 tes, 64 lulus dan 6 tes khusus
 PostgreSQL dilewati. Database aktif lokal `severli.sqlite3` sudah dimigrasi hingga
-`0006` setelah backup dan audit salinan. Database produksi tidak dimigrasi atau
-dideploy; penguncian PostgreSQL serta QA visual browser masih perlu diperiksa.
-Pemeriksaan 18 halaman/ekspor pada database lokal aktif juga lulus dengan koneksi
-read-only; field transaksi lama dan totalnya cocok dengan backup.
+`0007` setelah backup dan audit salinan. Pemeriksaan 18 halaman/ekspor pada
+database lokal aktif lulus dengan koneksi read-only; field transaksi lama dan
+totalnya cocok dengan backup. Pemisahan bahan/warna juga lulus smoke test database
+memori. Penguncian PostgreSQL serta QA visual browser masih perlu diperiksa;
+pembaruan bahan/warna belum dideploy ke produksi.
 
 Untuk audit salinan database SQLite lokal yang ada pada workspace ini, gunakan
 `./.venv/Scripts/python.exe scripts/audit_local_migrations.py`. Script membaca

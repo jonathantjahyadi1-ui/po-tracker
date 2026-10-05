@@ -34,7 +34,7 @@ tidak menyatakan bahwa data atau layanan produksi sudah dimigrasi/dideploy.
 - Catatan invoice serta Produk/Pemakaian std/Catatan PO historis tetap tersimpan
   ketika field tidak dikirim oleh formulir baru. Lampiran tetap di database.
 - Hasil kosong tidak dianggap nol. Resolver yang sama menghitung sisa dan
-  kelebihan per warna untuk daftar, detail, ringkasan, filter, serta ekspor.
+  kelebihan per pasangan bahan/warna untuk daftar, detail, ringkasan, filter, serta ekspor.
 - Identitas permintaan kiriman mencegah pengulangan POST yang sama menjadi
   transaksi ganda. Permintaan baru yang isinya identik tetap menjadi transaksi sah
   jika hasil serta sisa mengizinkannya.
@@ -43,6 +43,30 @@ tidak menyatakan bahwa data atau layanan produksi sudah dimigrasi/dideploy.
   roll baru atau log simpan ganda; permintaan baru dengan isi yang sama tetap
   dapat menambah roll sebagai transaksi terpisah. Ledger juga memeriksa pengguna,
   invoice tujuan, metadata, panel bahan/warna, perubahan roll existing, dan lampiran.
+
+## Pemisahan hasil berdasarkan bahan dan warna
+
+Permintaan tambahan pengguna setelah peninjauan detail PO memisahkan bahan dan
+warna yang sebelumnya diringkas per warna. Black pada Inesa dan Black pada Furing
+sekarang memiliki baris, hasil, total kiriman, sisa, serta pemakaian masing-masing.
+Form kiriman memilih bahan dan warna dalam field terpisah; riwayat dan Excel juga
+menampilkan kedua kolom. Sisa satu bahan tidak dapat dipakai untuk kiriman bahan lain.
+
+Migrasi `0007_production_material` menambahkan bahan pada `Hasil` dan `KirimGudang`,
+serta mengganti keunikan hasil menjadi PO/bahan/warna. Data lama dipetakan hanya
+jika tepat satu bahan diketahui untuk PO/warna tersebut. Data ambigu tetap satu
+baris **Bahan belum ditentukan**, dengan jumlah, identitas, tanggal, dan metadata
+asli. Purchasing menentukan bahan melalui form detail PO; pilihan tidak boleh
+menimpa pasangan yang sudah memiliki hasil/kiriman. Hasil atau kiriman baru untuk
+warna yang masih memiliki data ambigu ditahan sampai bahan lama ditentukan,
+sehingga total lama tidak dihitung ulang sebagai hasil baru. PO dengan data bahan
+yang belum dipetakan tidak dianggap Done.
+
+Pemeriksaan migrasi membandingkan seluruh field hasil dan kiriman lama. Pada
+PostgreSQL, sumber pemetaan dikunci selama transaksi migrasi untuk menghindari
+perubahan bersamaan ketika histori dan total dibandingkan. Audit menambahkan
+`results_without_material` dan `shipments_without_material` sebagai pengecualian
+yang perlu ditentukan oleh Purchasing.
 
 ## Cakupan tes otomatis
 
@@ -80,11 +104,11 @@ membandingkan jumlah invoice/roll/alokasi/PO/hasil/kiriman/lampiran/log, total
 yard/pcs, serta digest semua field lama termasuk lampiran biner dan hubungan
 historis. Isi kredensial atau data akun tidak dicetak.
 
-### Hasil verifikasi lokal, 5 Oktober 2026
+### Hasil verifikasi revisi PRD awal, 5 Oktober 2026
 
 - Pemeriksaan Django, pemeriksaan perubahan migrasi, lint Python, dan sintaks
   JavaScript lulus. Suite integrasi akhir yang mencakup model, service, view,
-  template, ekspor, replay permintaan dan migrasi: **57 tes dalam 6,685 detik;
+  template, ekspor, replay permintaan dan migrasi pada revisi awal: **57 tes dalam 6,685 detik;
   52 lulus, 5 dilewati** karena khusus PostgreSQL.
 - Fixture migrasi `0003 → 0006` mempertahankan seluruh field lama pada invoice,
   grup PO legacy, PO, alokasi, roll, lampiran biner, hasil, kiriman dan log.
@@ -126,6 +150,30 @@ historis. Isi kredensial atau data akun tidak dicetak.
 Aktivasi database lokal di atas merupakan langkah terpisah dari audit salinan.
 Tidak ada migrasi database PostgreSQL/Supabase atau deployment layanan produksi
 yang dijalankan dalam pekerjaan ini.
-Sebelum produksi, ulangi audit salinan PostgreSQL dari schema aktif, selesaikan
+Sebelum pembaruan produksi berikutnya, ulangi audit salinan PostgreSQL dari schema aktif, selesaikan
 pengecualian mapping yang relevan, dan jalankan tes transaksi PostgreSQL serta
 QA visual. Database lokal bukan bukti kondisi server.
+
+### Verifikasi pemisahan bahan/warna, 5 Oktober 2026
+
+- Suite terbaru: **70 tes dalam 9,604 detik; 64 lulus, 6 khusus PostgreSQL
+  dilewati**. Isian, kiriman, sisa, Done, replay, hak akses, dan Excel memisahkan
+  dua bahan dengan warna yang sama. Surplus satu bahan tidak meniadakan sisa bahan lain.
+- Fixture `0006 → 0007` menjaga seluruh field lama dan identitas hasil/kiriman,
+  serta total hasil 320 pcs dan kiriman 230 pcs. Data ambigu atau tanpa bahan
+  sumber tetap belum dipetakan; sumber tunggal termasuk tautan PO invoice legacy
+  dipetakan secara pasti. Pengulangan pemetaan tidak menggandakan record.
+- Audit salinan lokal, kemudian migrasi database lokal aktif ke `0007`, lulus
+  setelah backup `severli-before-material-20261005-091405.sqlite3` di `.verification/`.
+  Seluruh field transaksi lama, 78 log, 1.773 yard, 1.072 hasil pcs, dan 1.072
+  kiriman pcs tetap utuh. Delapan belas halaman/ekspor kembali lulus secara read-only.
+- Seluruh 22 template dikompilasi, sintaks JavaScript serta pemeriksaan Django,
+  konsistensi migrasi, dan Ruff lulus. Smoke test memori memeriksa Inesa/Furing
+  dengan warna sama, input unik, pengelompokan yard, kiriman per tanggal, serta
+  pemetaan data lama tanpa perubahan ID/pcs.
+- Pemeriksaan read-only Supabase menemukan schema aktif `severli` telah berada
+  di migrasi `0006`, dengan 25 roll/1.491,90 yard, 330 hasil pcs, 330 kiriman pcs,
+  dan tidak ada invoice bertotal negatif. Ini merupakan observasi schema produksi,
+  bukan penerapan migrasi `0007` atau bukti rilis kode terbaru.
+- Pembaruan bahan/warna belum dideploy. Konektor Render belum memiliki workspace
+  terpilih dan meminta konfirmasi pengguna untuk workspace tujuan.
