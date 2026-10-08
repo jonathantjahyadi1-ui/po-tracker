@@ -1,3 +1,4 @@
+import json
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from decimal import Decimal
@@ -36,19 +37,19 @@ from .parsers import import_yards, parse_yards, suspicious_yards
 from .services import (
     ajukan_alokasi,
     done,
-    kirim_gudang,
     map_legacy_production,
     pemakaian,
     pindah_status,
     po_balance,
     po_status,
     putuskan_alokasi,
-    simpan_hasil,
     simpan_invoice,
     tautkan_po,
     terima_alokasi,
     yard_po,
 )
+from .size_services import rekonsiliasi_ukuran, simpan_ukuran
+from .test_size_helpers import record_single_size, ship_single_size
 
 
 class ParserTests(TestCase):
@@ -155,7 +156,7 @@ class WorkflowTests(TestCase):
         data = {'tanggal': self.today, 'pcs': pcs, 'surat_jalan': '', 'catatan': ''}
         if request_id is not None:
             data['request_id'] = request_id
-        return kirim_gudang(po, color or self.color, data, self.user)
+        return ship_single_size(po, color or self.color, data, self.user)
 
     def test_po_normalization_duplicate_master_and_invoice(self):
         for raw in ('po-109', 'PO 109', 'PO - 109', 'PO_109', 'PO/109'):
@@ -408,7 +409,7 @@ class WorkflowTests(TestCase):
     def test_balance_usage_done_without_used_rolls(self):
         _, po = self.ready_po()
         self.assertEqual(yard_po(po, self.color), Decimal('1773.00'))
-        simpan_hasil(po, self.color, 1072, self.user)
+        record_single_size(po, self.color, 1072, self.user)
         self.assertEqual(pemakaian(po, self.color), Decimal('1.65'))
         for pcs in (430, 247, 250, 145):
             self.shipment(po, pcs)
@@ -421,7 +422,7 @@ class WorkflowTests(TestCase):
 
     def test_200_150_50_done_then_230_reopens(self):
         _, po = self.ready_po(self.rolls[:1])
-        simpan_hasil(po, self.color, 200, self.user)
+        record_single_size(po, self.color, 200, self.user)
         self.shipment(po, 150)
         state = po_status(po)
         self.assertEqual(
@@ -430,7 +431,7 @@ class WorkflowTests(TestCase):
         self.shipment(po, 50)
         self.assertEqual(po_status(po)['label'], 'Done')
         self.assertTrue(po_balance(po))
-        simpan_hasil(po, self.color, 230, self.user)
+        record_single_size(po, self.color, 230, self.user)
         self.assertEqual((po_status(po)['label'], po_status(po)['remaining']), ('Kurang kirim', 30))
         self.assertEqual(Hasil.objects.get(po=po, color=self.color).pcs, 230)
 
@@ -440,13 +441,13 @@ class WorkflowTests(TestCase):
         _, po = self.ready_po(self.rolls[:2])
         self.assertEqual(po_status(po)['label'], 'Belum ada hasil')
         self.assertTrue(all(row['hasil'] is None for row in po_status(po)['rows']))
-        simpan_hasil(po, self.color, 0, self.user)
+        record_single_size(po, self.color, 0, self.user)
         self.assertEqual(po_status(po)['label'], 'Belum lengkap')
-        simpan_hasil(po, blue, 0, self.user)
+        record_single_size(po, blue, 0, self.user)
         self.assertEqual(po_status(po)['label'], 'Belum ada hasil produksi')
         self.assertFalse(po_balance(po))
-        simpan_hasil(po, self.color, 100, self.user)
-        simpan_hasil(po, blue, 100, self.user)
+        record_single_size(po, self.color, 100, self.user)
+        record_single_size(po, blue, 100, self.user)
         # Direct insertion represents retained legacy anomalies, bypassing new-write validation.
         material = self.rolls[0].material
         KirimGudang.objects.create(
@@ -466,8 +467,8 @@ class WorkflowTests(TestCase):
         blue = Master.objects.create(kind='color', name='Blue')
         Roll.objects.filter(pk=self.rolls[1].pk).update(color=blue)
         _, po = self.ready_po(self.rolls[:2])
-        simpan_hasil(po, self.color, 0, self.user)
-        simpan_hasil(po, blue, 100, self.user)
+        record_single_size(po, self.color, 0, self.user)
+        record_single_size(po, blue, 100, self.user)
         self.shipment(po, 100, color=blue)
         self.assertEqual(po_status(po)['label'], 'Done')
 
@@ -475,12 +476,12 @@ class WorkflowTests(TestCase):
         _, po = self.ready_po(self.rolls[:1])
         with self.assertRaises(ValidationError):
             self.shipment(po, 1)
-        simpan_hasil(po, self.color, 200, self.user)
+        record_single_size(po, self.color, 200, self.user)
         self.shipment(po, 150)
         with self.assertRaises(ValidationError):
             self.shipment(po, 51)
         with self.assertRaises(ValidationError):
-            simpan_hasil(po, self.color, 149, self.user)
+            record_single_size(po, self.color, 149, self.user)
         self.assertEqual(Hasil.objects.get(po=po, color=self.color).pcs, 200)
         self.assertEqual(KirimGudang.objects.filter(po=po).count(), 1)
         for pcs in (0, -1):
@@ -489,7 +490,7 @@ class WorkflowTests(TestCase):
 
     def test_request_identity_retry_and_identical_valid_transactions(self):
         _, po = self.ready_po(self.rolls[:1])
-        simpan_hasil(po, self.color, 200, self.user)
+        record_single_size(po, self.color, 200, self.user)
         identity = str(uuid4())
         self.shipment(po, 50, request_id=identity)
         count = Log.objects.count()
@@ -506,7 +507,7 @@ class WorkflowTests(TestCase):
         _, po = self.ready_po(self.rolls[:1])
         alien = Master.objects.create(kind='color', name='Alien')
         with self.assertRaises(ValidationError):
-            simpan_hasil(po, alien, 10, self.user)
+            record_single_size(po, alien, 10, self.user)
         with self.assertRaises(ValidationError):
             self.shipment(po, 1, color=alien)
 
@@ -928,12 +929,21 @@ class WorkflowTests(TestCase):
         _, po = self.ready_po(self.rolls[:1])
         self.client.force_login(self.user)
         detail = reverse('po_detail', args=[po.pk])
-        self.client.post(detail, {'action': 'hasil', 'color': self.color.pk, 'pcs': '200'})
+        self.client.post(
+            detail,
+            {
+                'action': 'sizes',
+                'material': self.rolls[0].material_id,
+                'color': self.color.pk,
+                'sizes': json.dumps([{'label': 'All Size', 'pcs': 200}]),
+            },
+        )
+        size = Hasil.objects.get(po=po, color=self.color).sizes.get()
         payload = {
             'action': 'kirim',
             'color': self.color.pk,
             'tanggal': self.today.isoformat(),
-            'pcs': '150',
+            'sizes': json.dumps([{'id': size.pk, 'pcs': 150}]),
             'request_id': str(uuid4()),
         }
         self.client.post(detail, payload)
@@ -964,7 +974,7 @@ class WorkflowTests(TestCase):
         self.assertEqual(book.active.max_row, 16)
         self.assertIn('Bahan', list(next(book.active.values)))
         book.close()
-        payload.update(pcs='50', request_id=str(uuid4()))
+        payload.update(sizes=json.dumps([{'id': size.pk, 'pcs': 50}]), request_id=str(uuid4()))
         self.client.post(detail, payload)
         self.assertEqual(po_status(po)['label'], 'Done')
         self.assertContains(self.client.get(detail), 'Done')
@@ -973,7 +983,7 @@ class WorkflowTests(TestCase):
         blue = Master.objects.create(kind='color', name='Blue')
         Roll.objects.filter(pk=self.rolls[1].pk).update(color=blue)
         _, po = self.ready_po(self.rolls[:2])
-        simpan_hasil(po, blue, 0, self.user)
+        record_single_size(po, blue, 0, self.user)
         self.client.force_login(self.director)
         url = reverse('po_export', args=[po.pk])
 
@@ -989,8 +999,8 @@ class WorkflowTests(TestCase):
         self.assertIsNone(data['Cream']['Sisa kirim (pcs)'])
         self.assertEqual(data['Blue']['Hasil produksi (pcs)'], 0)
         self.assertEqual({row['Status PO'] for row in data.values()}, {'Belum lengkap'})
-        simpan_hasil(po, self.color, 100, self.user)
-        simpan_hasil(po, blue, 100, self.user)
+        record_single_size(po, self.color, 100, self.user)
+        record_single_size(po, blue, 100, self.user)
         material = self.rolls[0].material
         KirimGudang.objects.create(
             po=po, material=material, color=self.color, tanggal=self.today, pcs=90
@@ -1108,10 +1118,10 @@ class ConcurrencyTests(TransactionTestCase):
         putuskan_alokasi(allocation, 'acc', self.user, tgl_kirim=self.today)
         terima_alokasi(allocation, [self.roll.pk], self.today, self.user)
         po = tautkan_po(allocation, 'PO 109', self.user)
-        simpan_hasil(po, self.roll.color, 200, self.user)
+        record_single_size(po, self.roll.color, 200, self.user)
 
         def ship(number):
-            kirim_gudang(
+            ship_single_size(
                 po,
                 self.roll.color,
                 {'tanggal': self.today, 'pcs': 150, 'request_id': f'concurrent-{number}'},
@@ -1158,10 +1168,10 @@ class MaterialProductionTests(TestCase):
         self.client.force_login(self.user)
 
     def result(self, material, pcs):
-        return simpan_hasil(self.po, self.color, pcs, self.user, material=material)
+        return record_single_size(self.po, self.color, pcs, self.user, material=material)
 
     def ship(self, material, pcs, identity=None):
-        return kirim_gudang(
+        return ship_single_size(
             self.po,
             self.color,
             {'tanggal': self.today, 'pcs': pcs, 'request_id': identity or str(uuid4())},
@@ -1228,9 +1238,9 @@ class MaterialProductionTests(TestCase):
 
     def test_ambiguous_and_unrelated_material_selection_rejected(self):
         with self.assertRaises(ValidationError):
-            simpan_hasil(self.po, self.color, 10, self.user)
+            record_single_size(self.po, self.color, 10, self.user)
         with self.assertRaises(ValidationError):
-            kirim_gudang(self.po, self.color, {'tanggal': self.today, 'pcs': 1}, self.user)
+            ship_single_size(self.po, self.color, {'tanggal': self.today, 'pcs': 1}, self.user)
         alien = Master.objects.create(kind='material', name='Bahan lain')
         with self.assertRaises(ValidationError):
             self.result(alien, 10)
@@ -1293,7 +1303,12 @@ class MaterialProductionTests(TestCase):
         for material, hasil, sent in ((self.cotton, 200, 150), (self.polyester, 70, 40)):
             result = self.client.post(
                 detail,
-                {'action': 'hasil', 'material': material.pk, 'color': self.color.pk, 'pcs': hasil},
+                {
+                    'action': 'sizes',
+                    'material': material.pk,
+                    'color': self.color.pk,
+                    'sizes': json.dumps([{'label': 'All Size', 'pcs': hasil}]),
+                },
             )
             self.assertEqual(result.status_code, 302)
             self.assertEqual(
@@ -1304,7 +1319,18 @@ class MaterialProductionTests(TestCase):
                         'material': material.pk,
                         'color': self.color.pk,
                         'tanggal': self.today.isoformat(),
-                        'pcs': sent,
+                        'sizes': json.dumps(
+                            [
+                                {
+                                    'id': Hasil.objects.get(
+                                        po=self.po, material=material, color=self.color
+                                    )
+                                    .sizes.get()
+                                    .pk,
+                                    'pcs': sent,
+                                }
+                            ]
+                        ),
                         'request_id': str(uuid4()),
                     },
                 ).status_code,
@@ -1322,7 +1348,7 @@ class MaterialProductionTests(TestCase):
         self.assertEqual(rows[self.cotton.pk]['sent'][self.today], 150)
         self.assertEqual(rows[self.polyester.pk]['sent'][self.today], 40)
         for material in (self.cotton, self.polyester):
-            self.assertContains(page, f'id="hasil-{material.pk}-{self.color.pk}"')
+            self.assertContains(page, f'id="size-panel-{material.pk}-{self.color.pk}"')
         exported = {row['Bahan']: row for row in self.export_rows()}
         for material, hasil, sent, sisa, yard in (
             (self.cotton, 200, 150, 50, 80),
@@ -1361,7 +1387,9 @@ class MaterialProductionTests(TestCase):
         page = self.client.get(reverse('po_detail', args=[self.po.pk]))
         self.assertContains(page, 'Bahan belum ditentukan')
         for material in (self.cotton, self.polyester):
-            self.assertContains(page, f'id="hasil-{material.pk}-{self.color.pk}" disabled')
+            self.assertContains(
+                page, f'aria-controls="size-panel-{material.pk}-{self.color.pk}" disabled'
+            )
         legacy = [row for row in page.context['rows'] if row['material_id'] is None]
         self.assertEqual((legacy[0]['rolls'], legacy[0]['yard']), (None, None))
         exported = self.export_rows()
@@ -1387,6 +1415,16 @@ class MaterialProductionTests(TestCase):
         self.assertFalse(po_status(self.po)['unmapped_material'])
         self.assertEqual(self.rows()[(self.cotton.pk, self.color.pk)]['remaining'], 50)
         self.result(self.polyester, 0)
+        simpan_ukuran(
+            self.po, self.color, self.cotton, [{'label': 'All Size', 'pcs': 200}], self.user
+        )
+        size = historical.sizes.get()
+        rekonsiliasi_ukuran(
+            self.po,
+            historical.pk,
+            [{'shipment_id': shipment.pk, 'sizes': [{'id': size.pk, 'pcs': 150}]}],
+            self.user,
+        )
         self.ship(self.cotton, 50)
         self.assertTrue(po_status(self.po)['is_done'])
 
@@ -1580,6 +1618,7 @@ class HistoricalMigrationTests(TransactionTestCase):
         self.assertEqual(new_apps.get_model('tracking', 'InvoiceMaterial').objects.count(), 2)
         self.assertEqual(new_apps.get_model('tracking', 'AlokasiRoll').objects.count(), 3)
         output = StringIO()
+        self.restore_latest()
         call_command('audit_workflow', '--json', stdout=output)
         import json
 
@@ -1606,6 +1645,7 @@ class ProductionMaterialMigrationTests(TransactionTestCase):
     def test_single_material_maps_and_ambiguous_orphan_records_stay_unassigned(self):
         def get(name):
             return self.old.get_model('tracking', name)
+
         user = get('User').objects.create(username='production-migration', role='purchasing')
         vendor = get('Master').objects.create(kind='vendor', name='Migration vendor')
         cmt = get('Master').objects.create(kind='cmt', name='Migration CMT')

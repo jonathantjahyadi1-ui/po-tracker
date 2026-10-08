@@ -12,12 +12,14 @@ from .models import (
     Alokasi,
     AlokasiRoll,
     Hasil,
+    HasilUkuran,
     Invoice,
     InvoiceAttachment,
     InvoiceColor,
     InvoiceMaterial,
     InvoiceWrite,
     KirimGudang,
+    KirimUkuran,
     Log,
     Master,
     Po,
@@ -275,11 +277,14 @@ def po_status_many(pos):
     for allocation_po, legacy_po, material_id, color_id in rolls:
         pair_ids[allocation_po or legacy_po].add((material_id, color_id))
     results = {po_id: {} for po_id in ids}
-    for po_id, material_id, color_id, pcs in Hasil.objects.filter(po_id__in=ids).values_list(
-        'po_id', 'material_id', 'color_id', 'pcs'
-    ):
+    sized_items = {}
+    for result_id, po_id, material_id, color_id, pcs, complete in Hasil.objects.filter(
+        po_id__in=ids
+    ).values_list('id', 'po_id', 'material_id', 'color_id', 'pcs', 'sizes_complete'):
         pair = (material_id, color_id)
         results[po_id][pair] = pcs
+        if complete:
+            sized_items[result_id] = (po_id, pair)
         pair_ids[po_id].add(pair)
     shipments = {po_id: {} for po_id in ids}
     last = {po_id: None for po_id in ids}
@@ -295,6 +300,24 @@ def po_status_many(pos):
         pair_ids[po_id].add(pair)
         if last[po_id] is None or item['latest'] > last[po_id]:
             last[po_id] = item['latest']
+    # Sized item totals are derived; the parent pcs remains an atomic compatibility cache.
+    size_over = {}
+    if sized_items:
+        size_sent = dict(
+            KirimUkuran.objects.filter(ukuran__hasil_id__in=sized_items)
+            .values('ukuran_id')
+            .annotate(total=Sum('pcs'))
+            .values_list('ukuran_id', 'total')
+        )
+        for result_id, (po_id, pair) in sized_items.items():
+            results[po_id][pair] = 0
+        for size_id, result_id, pcs in HasilUkuran.objects.filter(
+            hasil_id__in=sized_items
+        ).values_list('id', 'hasil_id', 'pcs'):
+            po_id, pair = sized_items[result_id]
+            results[po_id][pair] += pcs
+            extra = max(size_sent.get(size_id, 0) - pcs, 0)
+            size_over[(po_id, pair)] = size_over.get((po_id, pair), 0) + extra
     master_ids = {
         master_id
         for pairs in pair_ids.values()
@@ -303,7 +326,7 @@ def po_status_many(pos):
         if master_id is not None
     }
     all_masters = Master.objects.in_bulk(master_ids)
-    return {
+    summaries = {
         po_id: _resolve_po(
             {
                 pair: {
@@ -318,6 +341,22 @@ def po_status_many(pos):
         )
         for po_id in ids
     }
+    for po_id, summary in summaries.items():
+        for row in summary['rows']:
+            extra = size_over.get((po_id, row['key']), 0)
+            if extra > row['over']:
+                summary['over'] += extra - row['over']
+                row['over'] = extra
+                row['status_key'], row['status_label'] = 'lebih_kirim', f'Lebih kirim {extra} pcs'
+        if summary['over']:
+            summary.update(
+                code='lebih_kirim',
+                label='Lebih kirim',
+                status_key='lebih_kirim',
+                status_label='Lebih kirim',
+                is_done=False,
+            )
+    return summaries
 
 
 def po_status(po):
@@ -955,6 +994,15 @@ def simpan_hasil(po, color, pcs, user, material=None):
     )
     if before == pcs:
         return Hasil.objects.get(po=po, material=material, color=color)
+    item = Hasil.objects.filter(po=po, material=material, color=color).first()
+    if item and item.sizes_complete:
+        raise ValidationError(
+            'Ubah hasil melalui rincian ukuran; total merupakan jumlah semua ukuran.'
+        )
+    if shipped:
+        raise ValidationError(
+            'Kiriman lama belum dirinci per ukuran; perubahan total hasil diblokir.'
+        )
     hasil, _ = Hasil.objects.update_or_create(
         po=po, material=material, color=color, defaults={'pcs': pcs}
     )
@@ -968,81 +1016,13 @@ def simpan_hasil(po, color, pcs, user, material=None):
     return hasil
 
 
-@transaction.atomic
 def kirim_gudang(po, color, data, user, material=None):
-    require_purchasing(user)
-    po = Po.objects.select_for_update().get(pk=po.pk)
+    from .size_services import kirim_ukuran
+
     payload = dict(data)
-    payload_material = payload.pop('material', None)
-    if material is None:
-        material = payload_material
-    elif payload_material is not None:
-        other_material = production_material(po, color, payload_material)
-        if production_material(po, color, material).pk != other_material.pk:
-            raise ValidationError('Pilihan bahan kiriman tidak konsisten.')
-    material = production_material(po, color, material)
-    request_id = payload.pop('request_id', None)
-    if request_id == '':
-        request_id = None
-    if request_id is not None and (not isinstance(request_id, str) or len(request_id) > 64):
-        raise ValidationError('Identitas permintaan kiriman tidak valid.')
-    payload['surat_jalan'] = limited_text(payload.get('surat_jalan', ''), 'Surat jalan gudang', 80)
-    if request_id:
-        previous = KirimGudang.objects.filter(request_id=request_id).first()
-        if previous:
-            if (
-                previous.po_id != po.pk
-                or previous.material_id != material.pk
-                or previous.color_id != color.pk
-                or any(getattr(previous, key) != value for key, value in payload.items())
-            ):
-                raise ValidationError('Identitas permintaan sudah digunakan untuk kiriman berbeda.')
-            return previous
-    require_mapped_production(po, color)
-    valid_date(payload['tanggal'], 'Tanggal kirim gudang')
-    pcs = payload['pcs']
-    if not isinstance(pcs, int) or isinstance(pcs, bool) or pcs <= 0:
-        raise ValidationError('Jumlah pcs harus bilangan bulat lebih dari 0.')
-    hasil = (
-        Hasil.objects.filter(po=po, material=material, color=color)
-        .values_list('pcs', flat=True)
-        .first()
-    )
-    if hasil is None:
-        raise ValidationError(
-            f'Isi hasil produksi {material.name} / {color.name} sebelum mencatat kiriman.'
-        )
-    shipped = (
-        KirimGudang.objects.filter(po=po, material=material, color=color).aggregate(
-            total=Sum('pcs')
-        )['total']
-        or 0
-    )
-    remaining = max(hasil - shipped, 0)
-    if pcs > remaining:
-        raise ValidationError(
-            f'Kiriman {pcs} pcs melebihi sisa {material.name} / {color.name} {remaining} pcs '
-            f'(hasil {hasil}, terkirim {shipped}).'
-        )
-    gudang = payload.get('gudang')
-    if gudang is not None and (gudang.kind != 'warehouse' or not gudang.active):
-        raise ValidationError('Pilih gudang aktif dari daftar.')
-    try:
-        with transaction.atomic():
-            shipment = KirimGudang.objects.create(
-                po=po, material=material, color=color, request_id=request_id, **payload
-            )
-    except IntegrityError:
-        if request_id and KirimGudang.objects.filter(request_id=request_id).exists():
-            raise ValidationError('Identitas permintaan sudah digunakan untuk kiriman berbeda.')
-        raise
-    log(
-        user,
-        'kirim gudang',
-        po.nomor,
-        f'{material.name} / {color.name}: {pcs} pcs; {payload["tanggal"]}',
-    )
-    return shipment
+    rows = payload.pop('sizes', None)
+    material = material if material is not None else payload.pop('material', None)
+    return kirim_ukuran(po, color, material, payload, rows, user, payload.pop('hasil_id', None))
 
 
 @transaction.atomic

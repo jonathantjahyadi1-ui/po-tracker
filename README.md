@@ -44,16 +44,16 @@ jalankan `manage.py seed_contoh` saat `DEBUG=true`.
    sebagian diperbolehkan. Isi nomor PO setelah seluruh roll dalam pengiriman
    diterima; nama produk opsional juga dikelola di CMT.
 5. Buka **PO → CMT → nomor PO**. Informasi PO hanya mengubah tanggal order.
-   Isi total hasil produksi per pasangan bahan dan warna. Bahan berbeda dengan
-   warna yang sama memiliki isian hasil dan sisa kirim masing-masing; angka baru
-   mengganti total pasangan tersebut sebelumnya.
-6. Tambah transaksi kiriman gudang. Hasil 200 pcs dan kiriman 150 pcs menghasilkan
+   Klik **Isi ukuran/Rincian ukuran** untuk mencatat total hasil S/M/L atau ukuran
+   custom pada setiap item bahan–warna. Total item dihitung otomatis; angka baru
+   mengganti hasil ukuran tersebut. Tabel utama tetap satu baris per item.
+6. Tambah transaksi kiriman gudang dengan jumlah per ukuran. Hasil 200 pcs dan kiriman 150 pcs menghasilkan
    **Kurang kirim 50 pcs**. Tambahan 50 pcs menghasilkan **Done** jika setiap pasangan
    sudah lengkap dan seluruh hasilnya terkirim. Hasil yang dinaikkan menjadi 230 pcs
    membuat PO kembali **Kurang kirim 30 pcs**.
 
-Kiriman baru tidak boleh melebihi sisa bahan/warna dan hasil tidak boleh dikurangi di
-bawah total kiriman tercatat. Hasil kosong berbeda dari hasil nol. Kelebihan pada
+Kiriman baru tidak boleh melebihi sisa setiap ukuran dan hasil ukuran tidak boleh
+dikurangi di bawah kiriman ukuran tersebut. Hasil kosong berbeda dari hasil nol. Kelebihan pada
 data lama tetap ditampilkan sebagai anomali per bahan/warna; jumlah bersih antarpasangan
 tidak dapat membuat PO Done. Tidak ada tombol selesai manual atau panel Roll PO.
 
@@ -66,6 +66,10 @@ Detail U-01 sampai U-09 dari PRD diterapkan sebagai **default implementasi yang
 masih berupa usulan**, bukan keputusan yang sudah disetujui pengguna. Pilihan,
 kompatibilitas data lama, dan hasil verifikasi dijelaskan di
 [catatan implementasi](docs/PRD_IMPLEMENTATION.md).
+
+Panduan ukuran, migrasi `0008`, dan rekonsiliasi kiriman historis tersedia di
+[panduan ukuran per warna](docs/PRODUCTION_SIZES.md). Data lama tetap memakai
+angka agregat sampai rincian dilengkapi; kiriman lama tidak dibagi otomatis.
 
 ## Variabel lingkungan
 
@@ -126,7 +130,7 @@ dibuktikan dengan PostgreSQL. Gunakan PostgreSQL tes terpisah melalui
 yang sisa gabungannya tidak cukup. Jangan gunakan database operasional sebagai
 database tes. Lihat catatan implementasi untuk batas verifikasi yang telah dijalankan.
 
-Verifikasi terbaru tanggal 5 Oktober 2026: 70 tes, 64 lulus dan 6 tes khusus
+Verifikasi alur sebelum fitur ukuran, tanggal 5 Oktober 2026: 70 tes, 64 lulus dan 6 tes khusus
 PostgreSQL dilewati. Database aktif lokal `severli.sqlite3` sudah dimigrasi hingga
 `0007` setelah backup dan audit salinan. Pemeriksaan 18 halaman/ekspor pada
 database lokal aktif lulus dengan koneksi read-only; field transaksi lama dan
@@ -139,3 +143,8 @@ Untuk audit salinan database SQLite lokal yang ada pada workspace ini, gunakan
 database sumber dengan koneksi read-only, menjalankan migrasi hanya pada salinan
 di `.verification/`, dan menuliskan laporan konservasi. Database dengan schema
 aplikasi lain dicatat sebagai pengecualian tanpa dipaksakan masuk ke model ini.
+
+Verifikasi fitur ukuran tanggal 8 Oktober 2026: 101 tes dijalankan, 93 lulus dan
+8 tes PostgreSQL dilewati. Migrasi lokal 0008 telah diterapkan setelah backup;
+semua baris lama tetap identik. Panduan dan batas verifikasi ada di
+[ukuran per warna](docs/PRODUCTION_SIZES.md).

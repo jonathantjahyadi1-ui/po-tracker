@@ -15,17 +15,17 @@ from .services import (
     _ids,
     ajukan_alokasi,
     batalkan_invoice,
-    kirim_gudang,
     map_legacy_production,
     po_status,
     po_status_many,
     putuskan_alokasi,
-    simpan_hasil,
     simpan_invoice,
     tautkan_po,
     terima_alokasi,
     ubah_roll_invoice,
 )
+from .size_services import rekonsiliasi_ukuran, simpan_ukuran
+from .test_size_helpers import record_single_size, ship_single_size
 
 
 class ServiceSafetyTests(TestCase):
@@ -111,14 +111,14 @@ class ServiceSafetyTests(TestCase):
         putuskan_alokasi(allocation, 'acc', self.user, tgl_kirim=self.today)
         terima_alokasi(allocation, [self.roll.pk], self.today, self.user)
         po = tautkan_po(allocation, 'PO LIMITS', self.user)
-        simpan_hasil(po, self.roll.color, 100, self.user)
+        record_single_size(po, self.roll.color, 100, self.user)
         for data in (
             {'tanggal': self.today, 'pcs': 10, 'surat_jalan': 'x' * 81},
             {'tanggal': self.today.isoformat(), 'pcs': 10},
             {'tanggal': self.today, 'pcs': 10, 'request_id': 123},
         ):
             with self.assertRaises(ValidationError):
-                kirim_gudang(po, self.roll.color, data, self.user)
+                ship_single_size(po, self.roll.color, data, self.user)
         self.assertFalse(KirimGudang.objects.exists())
 
     def test_cancelled_invoice_and_allocated_roll_are_locked_for_stale_callers(self):
@@ -213,8 +213,8 @@ class ServiceSafetyTests(TestCase):
 
     def test_global_shipment_identity_cannot_be_reused_by_another_po(self):
         _, po = self.ready_po()
-        simpan_hasil(po, self.roll.color, 100, self.user)
-        kirim_gudang(
+        record_single_size(po, self.roll.color, 100, self.user)
+        ship_single_size(
             po,
             self.roll.color,
             {'tanggal': self.today, 'pcs': 10, 'request_id': 'shared-id'},
@@ -226,10 +226,10 @@ class ServiceSafetyTests(TestCase):
         putuskan_alokasi(allocation, 'acc', self.user, tgl_kirim=self.today)
         terima_alokasi(allocation, [other_roll.pk], self.today, self.user)
         other_po = tautkan_po(allocation, 'PO OTHER', self.user)
-        simpan_hasil(other_po, other_roll.color, 100, self.user)
+        record_single_size(other_po, other_roll.color, 100, self.user)
         logs = Log.objects.count()
         with self.assertRaisesMessage(ValidationError, 'kiriman berbeda'):
-            kirim_gudang(
+            ship_single_size(
                 other_po,
                 other_roll.color,
                 {'tanggal': self.today, 'pcs': 10, 'request_id': 'shared-id'},
@@ -240,11 +240,11 @@ class ServiceSafetyTests(TestCase):
 
     def test_legitimate_identical_shipments_have_distinct_request_identity(self):
         _, po = self.ready_po()
-        simpan_hasil(po, self.roll.color, 100, self.user)
+        record_single_size(po, self.roll.color, 100, self.user)
         for identity in ('first-shipment', 'second-shipment'):
             payload = {'tanggal': self.today, 'pcs': 40, 'request_id': identity}
-            first = kirim_gudang(po, self.roll.color, payload, self.user)
-            repeated = kirim_gudang(po, self.roll.color, payload, self.user)
+            first = ship_single_size(po, self.roll.color, payload, self.user)
+            repeated = ship_single_size(po, self.roll.color, payload, self.user)
             self.assertEqual(first.pk, repeated.pk)
         self.assertEqual(KirimGudang.objects.count(), 2)
         self.assertEqual(po_status(po)['remaining'], 20)
@@ -283,8 +283,8 @@ class ServiceSafetyTests(TestCase):
         self.assertFalse(state['is_done'])
         self.assertEqual((state['hasil'], state['terkirim']), (100, 60))
         for callback in (
-            lambda: simpan_hasil(po, self.roll.color, 120, self.user),
-            lambda: kirim_gudang(
+            lambda: record_single_size(po, self.roll.color, 120, self.user),
+            lambda: ship_single_size(
                 po, self.roll.color, {'tanggal': self.today, 'pcs': 10}, self.user
             ),
         ):
@@ -300,7 +300,19 @@ class ServiceSafetyTests(TestCase):
         logs = Log.objects.count()
         map_legacy_production(po, self.roll.color, self.roll.material, self.user)
         self.assertEqual(Log.objects.count(), logs)
-        simpan_hasil(po, self.roll.color, 120, self.user)
+        with self.assertRaisesMessage(ValidationError, 'Kiriman lama'):
+            record_single_size(po, self.roll.color, 120, self.user)
+        simpan_ukuran(
+            po, self.roll.color, self.roll.material, [{'label': 'All Size', 'pcs': 100}], self.user
+        )
+        size = historical.sizes.get()
+        rekonsiliasi_ukuran(
+            po,
+            historical.pk,
+            [{'shipment_id': shipment.pk, 'sizes': [{'id': size.pk, 'pcs': 60}]}],
+            self.user,
+        )
+        record_single_size(po, self.roll.color, 120, self.user)
         self.assertEqual(po_status(po)['remaining'], 60)
         self.assertEqual(
             (historical.pk, shipment.pk),

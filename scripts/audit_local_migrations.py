@@ -18,6 +18,8 @@ TABLES = {
     'po': 'tracking_po',
     'hasil': 'tracking_hasil',
     'shipment': 'tracking_kirimgudang',
+    'sizes': 'tracking_hasilukuran',
+    'shipment_sizes': 'tracking_kirimukuran',
     'attachment': 'tracking_invoiceattachment',
     'log': 'tracking_log',
 }
@@ -45,7 +47,9 @@ def snapshot(path):
             if table == 'tracking_alokasi':
                 columns = [name for name in columns if name not in ('tgl_kirim', 'sj_kirim')]
             if table in ('tracking_hasil', 'tracking_kirimgudang'):
-                columns = [name for name in columns if name != 'material_id']
+                columns = [
+                    name for name in columns if name not in ('material_id', 'sizes_complete')
+                ]
             if table == 'tracking_alokasi' and 'cmt_id' not in columns:
                 columns.append('cmt_id')
             rows = db.execute(f'SELECT {",".join(columns)} FROM {table} ORDER BY id').fetchall()
@@ -97,7 +101,11 @@ def main():
         before = snapshot(copy)
         with sqlite3.connect(copy.as_uri() + '?mode=ro', uri=True) as sample:
             available = {row[0] for row in sample.execute('SELECT name FROM sqlite_master')}
-        required = set(TABLES.values()) - {'tracking_invoiceattachment'}
+        required = set(TABLES.values()) - {
+            'tracking_invoiceattachment',
+            'tracking_hasilukuran',
+            'tracking_kirimukuran',
+        }
         missing = sorted(required - available)
         if missing:
             unchanged = before_original == hashlib.sha256(original.read_bytes()).hexdigest()

@@ -11,11 +11,11 @@ from tracking.services import (
     kirim_gudang,
     master,
     putuskan_alokasi,
-    simpan_hasil,
     simpan_invoice,
     tautkan_po,
     terima_alokasi,
 )
+from tracking.size_services import simpan_ukuran
 
 
 class Command(BaseCommand):
@@ -59,9 +59,21 @@ class Command(BaseCommand):
         terima_alokasi(allocation, ids, today - timedelta(days=19), user)
         po = tautkan_po(allocation, 'PO 109', user, produk='Kemeja contoh')
         color = Master.objects.get(kind='color', name='Cream')
-        simpan_hasil(po, color, 1072, user)
-        for pcs in [430, 247, 250, 145]:
-            kirim_gudang(po, color, {'tanggal': today, 'pcs': pcs}, user)
+        material = invoice.roll_set.select_related('material').first().material
+        hasil = simpan_ukuran(po, color, material, [{'label': 'All Size', 'pcs': 1072}], user)
+        size = hasil.sizes.get()
+        for index, pcs in enumerate([430, 247, 250, 145]):
+            kirim_gudang(
+                po,
+                color,
+                {
+                    'tanggal': today,
+                    'sizes': [{'id': size.pk, 'pcs': pcs}],
+                    'request_id': f'contoh-{po.pk}-{index}',
+                },
+                user,
+                material=material,
+            )
         self.stdout.write(
             self.style.SUCCESS('Data contoh dibuat. Akun: contoh_purchasing / contoh123')
         )

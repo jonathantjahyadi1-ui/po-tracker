@@ -244,6 +244,7 @@ class AlokasiRoll(Dated):
 
 
 class Hasil(Dated):
+    sizes_complete = models.BooleanField(default=False)
     po = models.ForeignKey(Po, on_delete=models.PROTECT)
     material = models.ForeignKey(
         Master, on_delete=models.PROTECT, related_name='+', null=True, blank=True
@@ -293,3 +294,35 @@ class Log(Dated):
     aksi = models.CharField(max_length=60)
     objek = models.CharField(max_length=200)
     detail = models.TextField(blank=True)
+
+
+class HasilUkuran(Dated):
+    hasil = models.ForeignKey(Hasil, on_delete=models.PROTECT, related_name='sizes')
+    label = models.CharField(max_length=80)
+    key = models.CharField(max_length=80)
+    pcs = models.PositiveIntegerField()
+    urut = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        ordering = ['urut', 'pk']
+        constraints = [
+            models.UniqueConstraint(fields=['hasil', 'key'], name='hasil_size_key_unique'),
+            models.CheckConstraint(condition=~Q(key=''), name='hasil_size_key_required'),
+        ]
+
+    def save(self, *args, **kwargs):
+        self.label = normalize_name(self.label)
+        self.key = self.label.upper()
+        super().save(*args, **kwargs)
+
+
+class KirimUkuran(Dated):
+    kiriman = models.ForeignKey(KirimGudang, on_delete=models.PROTECT, related_name='sizes')
+    ukuran = models.ForeignKey(HasilUkuran, on_delete=models.PROTECT, related_name='shipments')
+    pcs = models.PositiveIntegerField()
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['kiriman', 'ukuran'], name='shipment_size_unique'),
+            models.CheckConstraint(condition=Q(pcs__gt=0), name='shipment_size_positive'),
+        ]

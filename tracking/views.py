@@ -13,7 +13,7 @@ from django.contrib.auth import login, logout
 from django.core.cache import cache
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.core.paginator import Paginator
-from django.db import transaction
+from django.db import OperationalError, connection, transaction
 from django.db.models import Count, Max, Prefetch, Q, Sum
 from django.http import HttpResponse, HttpResponseNotAllowed, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
@@ -49,13 +49,13 @@ from .services import (
     po_status_many,
     putuskan_alokasi,
     roll_count,
-    simpan_hasil,
     simpan_invoice,
     tautkan_po,
     terima_alokasi,
     ubah_produk_po,
     yard_total,
 )
+from .size_services import production_size_data, rekonsiliasi_ukuran, simpan_ukuran
 
 
 def access(*roles):
@@ -1128,11 +1128,67 @@ def po_rows(po, rolls):
     return rows, sorted(dates)
 
 
+def posted_size_rows(request, key='sizes'):
+    try:
+        return json.loads(request.POST.get(key, 'null'))
+    except (TypeError, ValueError):
+        raise ValidationError('Format rincian ukuran tidak valid.')
+
+
+def size_response(po):
+    summary = po_status(po)
+    rolls = list(po_rolls(po).select_related('invoice', 'material', 'color'))
+    po.summary = summary
+    rows, _ = po_rows(po, rolls)
+    return {
+        'summary': {
+            k: summary[k]
+            for k in ('hasil', 'terkirim', 'remaining', 'over', 'code', 'label', 'is_done')
+        },
+        'rows': [
+            {
+                k: row[k]
+                for k in (
+                    'row_key',
+                    'hasil',
+                    'shipped',
+                    'remaining',
+                    'over',
+                    'status_key',
+                    'status_label',
+                    'pemakaian',
+                )
+            }
+            for row in rows
+        ],
+        'items': production_size_data(po),
+        'missing_count': len(summary['missing_results']),
+        'shipments': [
+            {
+                'id': s.pk,
+                'date': s.tanggal.isoformat(),
+                'material': s.material.name if s.material else 'Bahan belum ditentukan',
+                'color': s.color.name,
+                'pcs': s.pcs,
+                'gudang': s.gudang.name if s.gudang else '—',
+                'surat_jalan': s.surat_jalan or '—',
+                'catatan': s.catatan or '—',
+                'sizes': [{'label': d.ukuran.label, 'pcs': d.pcs} for d in s.sizes.all()],
+            }
+            for s in KirimGudang.objects.filter(po=po)
+            .select_related('material', 'color', 'gudang')
+            .prefetch_related('sizes__ukuran')
+            .order_by('-tanggal', '-pk')
+        ],
+    }
+
+
 @access('purchasing', 'direktur')
 def po_detail(request, pk):
     po = get_object_or_404(Po.objects.select_related('cmt'), pk=pk)
     detail_error = None
     action = request.POST.get('action')
+    ajax = request.headers.get('X-Requested-With') == 'XMLHttpRequest'
     form = PoForm(request.POST if action in ('edit', 'info') else None, instance=po)
     if request.method == 'POST':
         write_only(request)
@@ -1158,16 +1214,28 @@ def po_detail(request, pk):
                             po.nomor,
                             f'{previous or "belum diisi"} → {locked.tgl_order or "belum diisi"}',
                         )
-            elif action == 'hasil':
+            elif action == 'sizes':
                 color = get_object_or_404(Master, pk=request.POST.get('color'), kind='color')
-                material = (
-                    get_object_or_404(Master, pk=request.POST.get('material'), kind='material')
-                    if request.POST.get('material')
-                    else None
+                material = get_object_or_404(
+                    Master, pk=request.POST.get('material'), kind='material'
                 )
-                simpan_hasil(
-                    po, color, input_pcs(request.POST.get('pcs')), request.user, material=material
+                simpan_ukuran(
+                    po,
+                    color,
+                    material,
+                    posted_size_rows(request),
+                    request.user,
+                    request.POST.get('hasil_id') or None,
                 )
+            elif action == 'reconcile_sizes':
+                rekonsiliasi_ukuran(
+                    po,
+                    request.POST.get('hasil_id'),
+                    posted_size_rows(request, 'shipments'),
+                    request.user,
+                )
+            elif action == 'hasil':
+                raise ValidationError('Isi atau ubah hasil melalui rincian ukuran.')
             elif action == 'kirim':
                 color = get_object_or_404(Master, pk=request.POST.get('color'), kind='color')
                 material = (
@@ -1186,7 +1254,8 @@ def po_detail(request, pk):
                     color,
                     {
                         'tanggal': input_date(request.POST.get('tanggal')),
-                        'pcs': input_pcs(request.POST.get('pcs')),
+                        'sizes': posted_size_rows(request),
+                        'hasil_id': request.POST.get('hasil_id') or None,
                         'gudang': warehouse,
                         'surat_jalan': request.POST.get('surat_jalan', ''),
                         'catatan': request.POST.get('catatan', ''),
@@ -1205,12 +1274,25 @@ def po_detail(request, pk):
                 map_legacy_production(po, color, material, request.user)
             else:
                 raise ValidationError('Aksi PO tidak dikenal.')
+            if ajax:
+                return JsonResponse({**size_response(po), 'request_id': uuid4().hex})
             messages.success(request, 'PO diperbarui.')
             back = safe_back(request, f'/po/cmt/{po.cmt_id}/' if po.cmt_id else '/po/historis/')
             from urllib.parse import urlencode
 
             return redirect(f'/po/{pk}/?{urlencode({"back": back})}')
-        except (ValidationError, ValueError) as error:
+        except (ValidationError, ValueError, OperationalError) as error:
+            conflict = isinstance(error, OperationalError)
+            if conflict:
+                if connection.vendor != 'sqlite' or 'locked' not in str(error).lower():
+                    raise
+                error = ValidationError(
+                    'Data sedang diperbarui pengguna lain. '
+                    'Coba simpan kembali; draft tetap tersedia.'
+                )
+            if ajax:
+                errors = error.messages if isinstance(error, ValidationError) else [str(error)]
+                return JsonResponse({'errors': errors}, status=409 if conflict else 400)
             messages.error(request, str(error))
             detail_error = str(error)
             po.refresh_from_db()
@@ -1221,7 +1303,13 @@ def po_detail(request, pk):
     )
     po.summary = po_status(po)
     rows, dates = po_rows(po, rolls)
+    size_data = production_size_data(po)
     for row in rows:
+        row['size_data'] = size_data.get(row['row_key'], {})
+        row['size_summary'] = ' · '.join(
+            f'{s["label"]} {s["pcs"]}' for s in row['size_data'].get('sizes', [])[:3]
+        )
+        row['size_more'] = max(len(row['size_data'].get('sizes', [])) - 3, 0)
         row['input_hasil'] = (
             request.POST.get('pcs', '')
             if detail_error
@@ -1249,6 +1337,7 @@ def po_detail(request, pk):
             'summary': po.summary,
             'rolls': rolls,
             'rows': rows,
+            'size_data': size_data,
             'dates': dates,
             'totals': totals,
             'balance': po.summary['is_done'],
@@ -1267,6 +1356,7 @@ def po_detail(request, pk):
             'materials': ', '.join(dict.fromkeys(roll.material.name for roll in rolls)),
             'shipments': KirimGudang.objects.filter(po=po)
             .select_related('material', 'color', 'gudang')
+            .prefetch_related('sizes__ukuran')
             .order_by('-tanggal', '-id'),
             'request_id': request.POST.get('request_id') or uuid4().hex,
             'posted': request.POST if detail_error else {},
