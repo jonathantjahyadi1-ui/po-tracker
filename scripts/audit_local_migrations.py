@@ -42,7 +42,9 @@ def snapshot(path):
             columns = [row[1] for row in db.execute(f'PRAGMA table_info({table})')]
             # Ignore only fields added by these migrations. Retained legacy fields must match.
             columns = [
-                name for name in columns if name not in ('invoice_color_id', 'cmt_id', 'request_id')
+                name
+                for name in columns
+                if name not in ('invoice_color_id', 'cmt_id', 'request_id', 'payment_reconciled')
             ]
             if table == 'tracking_alokasi':
                 columns = [name for name in columns if name not in ('tgl_kirim', 'sj_kirim')]

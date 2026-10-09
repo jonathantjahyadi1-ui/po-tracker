@@ -1,0 +1,20 @@
+{% extends 'base.html' %}{% load tracker l10n %}
+{% block content %}
+<div class="page-head"><div><a class="back" href="{% url 'payment_detail' invoice.pk %}">Detail Payment</a><h1>Bayar {{ invoice.nomor }}</h1><p>{{ invoice.vendor.name }} · Tanggal invoice {{ invoice.tanggal|date:'d M Y' }}</p></div></div>
+<section class="panel form-section">{% include 'partials/payment_summary.html' %}</section>
+<form method="post" enctype="multipart/form-data" class="panel form-section section-gap payment-form" data-payment-form data-submit-form data-remaining="{{ summary.remaining|unlocalize }}">
+  {% csrf_token %}{{ form.remaining_seen }}{{ form.request_id }}
+  {% if form.errors %}<div class="form-error-summary" role="alert" tabindex="-1" data-error-summary><strong>Pembayaran belum tersimpan.</strong><p>Isian tetap tersedia. Pilih ulang bukti pembayaran sebelum mencoba lagi.</p><a href="{% url 'payment_create' invoice.pk %}">Buka ulang form dengan sisa terbaru</a></div>{% endif %}
+  {{ form.non_field_errors }}{{ form.remaining_seen.errors }}{{ form.request_id.errors }}
+  <h2>Catat pembayaran</h2><p class="field-help">Catat pembayaran yang dilakukan di luar aplikasi. Penyimpanan ini tidak melakukan transfer bank.</p>
+  <div class="field-grid section-gap">
+    <div class="field"><label for="{{ form.kind.id_for_label }}">{{ form.kind.label }}</label>{{ form.kind }}{{ form.kind.errors }}</div>
+    <div class="field"><label for="{{ form.amount.id_for_label }}">{{ form.amount.label }}</label>{{ form.amount }}{{ form.amount.errors }}<p class="field-help">Lunas memakai seluruh sisa tagihan. Cicil dapat diisi, misalnya 500.000.000.</p></div>
+    <div class="field"><label for="{{ form.payment_date.id_for_label }}">{{ form.payment_date.label }}</label>{{ form.payment_date }}{{ form.payment_date.errors }}<p class="field-help">Tanggal awal mengikuti hari ini di Asia/Jakarta.</p></div>
+    <div class="field"><label for="{{ form.proof.id_for_label }}">{{ form.proof.label }}</label>{{ form.proof }}{{ form.proof.errors }}<p class="field-help">PDF, JPG, JPEG, atau PNG. Maksimal 5 MB.</p></div>
+  </div>
+  <div class="payment-preview section-gap" aria-live="polite"><span>Sisa sebelum: <strong>{% if summary.remaining != None %}Rp {{ summary.remaining|indo }}{% else %}Belum terverifikasi{% endif %}</strong></span><span>Sisa setelah: <strong data-payment-after>—</strong></span></div>
+  <p class="field-help" data-payment-warning role="status"></p>
+  <div class="row-actions section-gap"><button class="button primary" type="submit">Simpan pembayaran</button><a class="button" href="{% url 'payment_detail' invoice.pk %}">Batal</a></div>
+</form>
+{% endblock %}

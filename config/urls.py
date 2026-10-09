@@ -1,6 +1,6 @@
 from django.urls import path
 
-from tracking import views
+from tracking import payment_views, views
 
 urlpatterns = [
     path('healthz/', views.health, name='health'),
@@ -30,6 +30,11 @@ urlpatterns = [
     path('roll/status/', views.roll_status, name='roll_status'),
     path('akun/', views.accounts, name='accounts'),
     path('riwayat/', views.history, name='history'),
+    path('payment/', payment_views.payment_list, name='payment_list'),
+    path('payment/download/', payment_views.payment_export, name='payment_export'),
+    path('payment/bukti/<int:pk>/', payment_views.payment_proof, name='payment_proof'),
+    path('payment/<int:pk>/', payment_views.payment_detail, name='payment_detail'),
+    path('payment/<int:pk>/bayar/', payment_views.payment_create, name='payment_create'),
 ]
 handler403 = views.forbidden
 handler404 = views.not_found

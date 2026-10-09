@@ -1,0 +1,16 @@
+{% load tracker l10n %}
+{% if summary.status_key == 'reconciliation' %}
+<div class="help-callout" role="status">Posisi pembayaran invoice lama belum terverifikasi. Total dibayar, sisa, dan progres belum dapat dipastikan. Invoice ini memerlukan rekonsiliasi sebelum pembayaran dapat dicatat.</div>
+{% endif %}
+<dl class="payment-totals">
+  <div><dt>Total tagihan</dt><dd>Rp {{ invoice.total_rp|indo }}</dd></div>
+  <div><dt>Total dibayar</dt><dd>{% if summary.paid != None %}Rp {{ summary.paid|indo }}{% else %}Belum terverifikasi{% endif %}</dd></div>
+  <div><dt>Sisa tagihan</dt><dd>{% if summary.remaining != None %}Rp {{ summary.remaining|indo }}{% else %}Belum terverifikasi{% endif %}</dd></div>
+</dl>
+<div class="payment-position">
+  <span class="status payment-{{ summary.status_key }}">{{ summary.status }}</span>
+  {% if summary.progress != None %}<div class="payment-progress">
+    <progress max="100" value="{{ summary.progress|unlocalize }}" aria-label="Progres pembayaran {{ invoice.nomor }}"></progress>
+    <span>{{ summary.progress|floatformat:1 }}%</span>
+  </div>{% endif %}
+</div>

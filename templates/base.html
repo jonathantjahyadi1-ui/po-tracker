@@ -10,18 +10,20 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="{% static 'app.css' %}">
+  <link rel="stylesheet" href="{% static 'payment.css' %}">
   <script src="{% static 'app.js' %}" defer></script>
+  <script src="{% static 'payment.js' %}" defer></script>
 </head>
 <body>
 {% if request.user.is_authenticated %}
 <a class="skip" href="#main">Lewati navigasi</a>
 <aside class="sidebar" id="sidebar">
   <div class="sidebar-head">
-    <a class="brand" href="/">severli<span>PO TRACKER</span></a>
+    <a class="brand" href="{% if request.user.role == 'admin' %}{% url 'accounts' %}{% elif request.user.role == 'purchasing' or request.user.role == 'direktur' %}{% url 'dashboard' %}{% else %}{% url 'payment_list' %}{% endif %}">severli<span>PO TRACKER</span></a>
     <button class="sidebar-close" id="sidebar-close" type="button" aria-label="Tutup menu">&times;</button>
   </div>
   <nav aria-label="Navigasi utama">
-    {% if request.user.role != 'admin' %}
+    {% if request.user.role == 'purchasing' or request.user.role == 'direktur' %}
     <a href="{% url 'dashboard' %}" {% if active == 'dashboard' %}aria-current="page"{% endif %}>Ringkasan</a>
     <a href="{% url 'vendor_list' %}" {% if active == 'vendor' %}aria-current="page"{% endif %}>Vendor</a>
     <a href="{% url 'allocation_list' %}" {% if active == 'allocation' %}aria-current="page"{% endif %}>Alokasi</a>
@@ -29,10 +31,13 @@
     <a href="{% url 'po_list' %}" {% if active == 'po' %}aria-current="page"{% endif %}>PO</a>
     <a href="{% url 'master' %}" {% if active == 'master' %}aria-current="page"{% endif %}>Master</a>
     {% endif %}
+    {% if request.user.role == 'admin' or request.user.role == 'purchasing' or request.user.role == 'direktur' %}
     <a href="{% url 'history' %}" {% if active == 'history' %}aria-current="page"{% endif %}>Riwayat</a>
+    {% endif %}
     {% if request.user.role == 'admin' %}
     <a href="{% url 'accounts' %}" {% if active == 'accounts' %}aria-current="page"{% endif %}>Akun</a>
     {% endif %}
+    <a href="{% url 'payment_list' %}" {% if active == 'payment' %}aria-current="page"{% endif %}>Payment</a>
   </nav>
   <div class="side-bottom">
     <strong>{{ request.user.username }}</strong>

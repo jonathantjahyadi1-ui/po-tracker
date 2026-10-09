@@ -21,6 +21,7 @@ class User(AbstractUser):
         PURCHASING = 'purchasing', 'Purchasing'
         DIREKTUR = 'direktur', 'Direktur'
         ADMIN = 'admin', 'Admin'
+        ACCOUNTING = 'accounting', 'Accounting'
 
     role = models.CharField(max_length=12, choices=Role.choices, default=Role.DIREKTUR)
     created_at = models.DateTimeField(default=timezone.now)
@@ -87,6 +88,7 @@ class Invoice(Dated):
     surat_jalan = models.CharField(max_length=80, blank=True)
     tanggal = models.DateField()
     total_rp = models.DecimalField(max_digits=16, decimal_places=2, default=0)
+    payment_reconciled = models.BooleanField(default=True)
     catatan = models.TextField(blank=True)
     dibatalkan = models.BooleanField(default=False)
     dibuat_oleh = models.ForeignKey(User, on_delete=models.PROTECT)
@@ -113,6 +115,36 @@ class InvoiceWrite(Dated):
     invoice = models.ForeignKey(Invoice, on_delete=models.PROTECT, related_name='write_requests')
     request_id = models.CharField(max_length=64, unique=True)
     fingerprint = models.CharField(max_length=64)
+
+
+class InvoicePayment(Dated):
+    class Kind(models.TextChoices):
+        LUNAS = 'lunas', 'Lunas'
+        CICIL = 'cicil', 'Cicil'
+
+    invoice = models.ForeignKey(Invoice, on_delete=models.PROTECT, related_name='payments')
+    amount = models.DecimalField(max_digits=16, decimal_places=2)
+    payment_date = models.DateField()
+    kind = models.CharField(max_length=5, choices=Kind.choices)
+    recorded_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name='invoice_payments')
+    request_id = models.CharField(max_length=64, unique=True)
+    fingerprint = models.CharField(max_length=64)
+    proof_filename = models.CharField(max_length=180)
+    proof_content_type = models.CharField(max_length=40)
+    proof_size = models.PositiveIntegerField()
+    proof_content = models.BinaryField()
+
+    class Meta:
+        ordering = ['payment_date', 'created_at', 'pk']
+        constraints = [
+            models.CheckConstraint(condition=Q(amount__gt=0), name='invoice_payment_positive'),
+            models.CheckConstraint(
+                condition=Q(kind__in=['lunas', 'cicil']), name='invoice_payment_kind'
+            ),
+        ]
+        indexes = [
+            models.Index(fields=['invoice', 'payment_date'], name='invoice_payment_date_idx')
+        ]
 
 
 class InvoicePo(Dated):

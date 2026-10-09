@@ -10,6 +10,7 @@ from zipfile import BadZipFile
 
 from django.contrib import messages
 from django.contrib.auth import login, logout
+from django.contrib.auth.decorators import login_required
 from django.core.cache import cache
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.core.paginator import Paginator
@@ -19,6 +20,7 @@ from django.http import HttpResponse, HttpResponseNotAllowed, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 from django.utils.http import content_disposition_header, url_has_allowed_host_and_scheme
+from django.views.decorators.http import require_GET
 from openpyxl import Workbook
 from openpyxl.utils.exceptions import InvalidFileException
 
@@ -125,7 +127,8 @@ def health(request):
 
 def sign_in(request):
     if request.user.is_authenticated:
-        return redirect('dashboard')
+        destination = {'admin': 'accounts', 'purchasing': 'dashboard', 'direktur': 'dashboard'}
+        return redirect(destination.get(request.user.role, 'payment_list'))
     username = request.POST.get('username', '').casefold()
     identity = f'{request.META.get("REMOTE_ADDR", "")}:{username}'
     key = f'login:{sha256(identity.encode()).hexdigest()}'
@@ -137,12 +140,13 @@ def sign_in(request):
         if form.is_valid():
             cache.delete(key)
             login(request, form.get_user())
-            return redirect('accounts' if form.get_user().role == 'admin' else 'dashboard')
+            destination = {'admin': 'accounts', 'purchasing': 'dashboard', 'direktur': 'dashboard'}
+            return redirect(destination.get(form.get_user().role, 'payment_list'))
         cache.set(key, cache.get(key, 0) + 1, 900)
     return render(request, 'login.html', {'form': form, 'title': 'Masuk'})
 
 
-@access('purchasing', 'direktur', 'admin')
+@login_required
 def sign_out(request):
     if request.method != 'POST':
         return HttpResponseNotAllowed(['POST'])
@@ -580,7 +584,17 @@ def invoice_edit(request, pk=None):
     )
     if invoice:
         initial['vendor'] = invoice.vendor.name
-    form = InvoiceForm(request.POST or None, request.FILES or None, initial=initial)
+    form = InvoiceForm(
+        request.POST or None,
+        request.FILES or None,
+        initial=initial,
+        legacy_zero=bool(invoice and not invoice.payment_reconciled and invoice.total_rp == 0),
+    )
+    payment_locked = bool(invoice and invoice.payments.exists())
+    if payment_locked:
+        for key in ('total_rp', 'nomor', 'vendor'):
+            form.fields[key].widget.attrs['readonly'] = True
+        form.fields['invoice_file'].widget.attrs['disabled'] = True
     draft_error = None
     try:
         input_groups = draft_groups(request) if request.method == 'POST' else []
@@ -644,6 +658,7 @@ def invoice_edit(request, pk=None):
             'warehouses': Master.objects.filter(kind='warehouse', active=True),
             'form_error': form_error,
             'locked_metadata': locked_metadata,
+            'payment_locked': payment_locked,
             'existing_material_count': invoice.material_groups.count() if invoice else 0,
             'request_id': request.POST.get('request_id') or uuid4().hex,
         },
@@ -667,6 +682,7 @@ def invoice_detail(request, pk):
             'active': 'vendor',
             'invoice': invoice,
             'attachment': attachment,
+            'payment_locked': invoice.payments.exists(),
             'material_count': len({roll.material_id for roll in rolls}),
             'rolls': rolls,
             'roll_count': roll_count(invoice.roll_set.all()),
@@ -678,7 +694,8 @@ def invoice_detail(request, pk):
     )
 
 
-@access('purchasing', 'direktur')
+@login_required
+@require_GET
 def invoice_attachment(request, pk):
     attachment = get_object_or_404(InvoiceAttachment, invoice_id=pk)
     response = HttpResponse(attachment.content, content_type=attachment.content_type)

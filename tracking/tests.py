@@ -143,7 +143,7 @@ class WorkflowTests(TestCase):
             'nomor': number,
             'tanggal': self.today.isoformat(),
             'surat_jalan': '',
-            'total_rp': '0',
+            'total_rp': '1000',
             'material[]': ['Cotton'],
             'color[]': ['Cream'],
             'lokasi[]': [''],
@@ -794,7 +794,7 @@ class WorkflowTests(TestCase):
                 'vendor': 'Vendor Baru',
                 'nomor': 'INV-OVERRIDES',
                 'tanggal': self.today.isoformat(),
-                'total_rp': '0',
+                'total_rp': '1000',
                 'existing': '1',
                 f'existing-{rolls[1].pk}': '94',
             },
@@ -816,7 +816,7 @@ class WorkflowTests(TestCase):
             'vendor': 'Vendor Baru',
             'nomor': 'INV-NESTED',
             'tanggal': self.today.isoformat(),
-            'total_rp': '0',
+            'total_rp': '1000',
             'group_count': '2',
             'groups-0-material': 'Cotton',
             'groups-0-row_count': '2',
@@ -1030,7 +1030,7 @@ class WorkflowTests(TestCase):
         download = self.client.get(reverse('invoice_attachment', args=[invoice.pk]))
         self.assertEqual((download.status_code, download.content), (200, b'%PDF-1.7\nexample'))
         self.assertIn('attachment;', download['Content-Disposition'])
-        for user, status in ((self.director, 200), (self.admin, 403)):
+        for user, status in ((self.director, 200), (self.admin, 200)):
             self.client.force_login(user)
             self.assertEqual(
                 self.client.get(reverse('invoice_attachment', args=[invoice.pk])).status_code,
@@ -1042,7 +1042,7 @@ class WorkflowTests(TestCase):
             'nomor': 'INV-UPLOAD',
             'surat_jalan': '',
             'tanggal': self.today.isoformat(),
-            'total_rp': '0',
+            'total_rp': '1000',
             'existing': '1',
         }
         url = reverse('invoice_edit', args=[invoice.pk])
@@ -1084,7 +1084,7 @@ class ConcurrencyTests(TransactionTestCase):
                 'nomor': 'INV-1',
                 'surat_jalan': '',
                 'tanggal': self.today,
-                'total_rp': Decimal(0),
+                'total_rp': Decimal(1000),
             },
             [{'material': 'Cotton', 'color': 'Cream', 'lokasi': '', 'yards': [Decimal(100)]}],
             self.user,

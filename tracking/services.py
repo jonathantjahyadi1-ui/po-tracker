@@ -4,8 +4,8 @@ from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 from django.core.exceptions import PermissionDenied, ValidationError
-from django.db import IntegrityError, transaction
-from django.db.models import Count, Max, Q, Sum
+from django.db import IntegrityError, connection, transaction
+from django.db.models import Count, F, Max, Q, Sum
 from django.utils import timezone
 
 from .models import (
@@ -26,6 +26,8 @@ from .models import (
     Roll,
     normalize_po,
 )
+from .money import parse_money
+from .uploads import validate_document
 
 ZERO = Decimal('0.00')
 # Siap kirim and the production roll states remain readable for legacy data only.
@@ -43,6 +45,14 @@ TRANSITIONS = {
 def require_purchasing(user):
     if not user.is_authenticated or not user.is_active or user.role != 'purchasing':
         raise PermissionDenied('Hanya Purchasing yang dapat mengubah data operasional.')
+
+
+def lock_invoice(pk):
+    # SQLite has no SELECT FOR UPDATE. Obtain its write lock before reading balances.
+    # All invoice financial writers use this same lock order, also on PostgreSQL.
+    if connection.vendor == 'sqlite':
+        Invoice.objects.filter(pk=pk).update(total_rp=F('total_rp'))
+    return Invoice.objects.select_for_update().get(pk=pk)
 
 
 def log(user, aksi, objek, detail=''):
@@ -726,13 +736,15 @@ def _invoice_retry(request_id, fingerprint):
 @transaction.atomic
 def simpan_invoice(data, groups, user, invoice=None):
     require_purchasing(user)
+    if data.get('invoice_file'):
+        validate_document(data['invoice_file'], 'File invoice', 10)
     panels = _invoice_panels(groups)
     if invoice is None and not panels:
         raise ValidationError('Isi minimal satu bahan, satu warna, dan satu roll.')
     if invoice:
         # Editing and cancellation both lock the invoice before reserving roll rows.
         # This also keeps the outer edit transaction (ubah_roll -> simpan) in one order.
-        invoice = Invoice.objects.select_for_update().get(pk=invoice.pk)
+        invoice = lock_invoice(invoice.pk)
         if invoice.dibatalkan:
             raise ValidationError('Invoice yang dibatalkan tidak dapat diubah.')
     request_id = data.get('request_id')
@@ -755,8 +767,20 @@ def simpan_invoice(data, groups, user, invoice=None):
     valid_date(data['tanggal'], 'Tanggal invoice')
     if not nomor or len(nomor) > 80:
         raise ValidationError('Nomor invoice wajib diisi, maksimal 80 karakter.')
-    if data.get('total_rp', ZERO) < 0:
-        raise ValidationError('Total rupiah tidak boleh negatif.')
+    total = parse_money(data.get('total_rp', invoice.total_rp if invoice else ZERO))
+    legacy_zero = invoice and not invoice.payment_reconciled and total == invoice.total_rp
+    if total <= 0 and not legacy_zero:
+        raise ValidationError('Total tagihan wajib lebih besar dari nol.')
+    upload = data.get('invoice_file')
+    if upload:
+        validate_document(upload, 'File invoice', 10)
+    if invoice and invoice.payments.exists():
+        if total != invoice.total_rp or upload:
+            raise ValidationError(
+                'Total dan file invoice terkunci karena sudah memiliki pembayaran.'
+            )
+        if invoice.vendor_id != vendor.pk or invoice.nomor != nomor:
+            raise ValidationError('Vendor dan nomor invoice terkunci setelah pembayaran.')
     if 'surat_jalan' in data:
         invoice_delivery_note = limited_text(data['surat_jalan'], 'Surat jalan invoice', 80)
     if (
@@ -782,7 +806,8 @@ def simpan_invoice(data, groups, user, invoice=None):
         invoice = Invoice(dibuat_oleh=user)
     for key in ('surat_jalan', 'tanggal', 'total_rp'):
         if key in data:
-            setattr(invoice, key, invoice_delivery_note if key == 'surat_jalan' else data[key])
+            value = invoice_delivery_note if key == 'surat_jalan' else data[key]
+            setattr(invoice, key, total if key == 'total_rp' else value)
     invoice.nomor, invoice.vendor = nomor, vendor
     invoice.save()
     upload = data.get('invoice_file')
@@ -876,7 +901,9 @@ def simpan_invoice(data, groups, user, invoice=None):
 @transaction.atomic
 def batalkan_invoice(invoice, user):
     require_purchasing(user)
-    invoice = Invoice.objects.select_for_update().get(pk=invoice.pk)
+    invoice = lock_invoice(invoice.pk)
+    if invoice.payments.exists():
+        raise ValidationError('Invoice dengan pembayaran tidak dapat dibatalkan.')
     rolls = list(
         Roll.objects.select_for_update(of=('self',)).filter(invoice=invoice).order_by('pk')
     )

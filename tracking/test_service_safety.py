@@ -37,7 +37,7 @@ class ServiceSafetyTests(TestCase):
             'vendor': 'Vendor Safety',
             'nomor': 'INV-SAFETY',
             'tanggal': self.today - timedelta(days=2),
-            'total_rp': Decimal('0'),
+            'total_rp': Decimal('1000'),
             'surat_jalan': '',
         }
         self.groups = [
@@ -361,7 +361,7 @@ class InvoiceLockConcurrencyTests(TransactionTestCase):
             'vendor': 'Vendor Locking',
             'nomor': 'INV-LOCKING',
             'tanggal': timezone.localdate(),
-            'total_rp': Decimal(0),
+            'total_rp': Decimal(1000),
         }
         self.invoice = simpan_invoice(
             self.data,

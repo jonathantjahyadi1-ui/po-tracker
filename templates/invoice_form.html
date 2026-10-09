@@ -8,15 +8,17 @@
   {% if form_error %}<div class="form-error-summary" role="alert" tabindex="-1" data-error-summary><strong>Invoice belum tersimpan.</strong><p>Periksa isian yang ditandai. Data yang sudah Anda isi tetap tersedia.</p></div>{% endif %}
   {{ form.non_field_errors }}
   <section class="panel form-section"><h2>Informasi invoice</h2>
+    {% if payment_locked %}<p class="help-callout">Pembayaran sudah tercatat. Total, vendor, nomor, dan file invoice terkunci; detail lainnya tetap mengikuti aturan invoice.</p>{% endif %}
     <div class="field-grid">
       {% for field in form %}{% if field.name != 'catatan' %}
       <div class="field {% if field.name == 'invoice_file' %}wide{% endif %}">
         <label for="{{ field.id_for_label }}">{{ field.label }}</label>
         {% if field.name == 'vendor' %}
-        <input id="{{ field.id_for_label }}" name="vendor" value="{{ field.value|default:'' }}" list="vendor-options" required {% if locked_metadata %}readonly{% endif %}>
+        <input id="{{ field.id_for_label }}" name="vendor" value="{{ field.value|default:'' }}" list="vendor-options" required {% if locked_metadata or payment_locked %}readonly{% endif %}>
         {% else %}{{ field }}{% endif %}{{ field.errors }}
         {% if field.name == 'invoice_file' %}<p class="field-help">PDF, JPG, atau PNG. Maksimal 10 MB.</p>
-        {% if attachment %}<p class="field-help">Tersimpan: <a href="{% url 'invoice_attachment' invoice.pk %}">{{ attachment.filename }}</a>. Pilih file baru untuk mengganti.</p>{% endif %}{% endif %}
+        {% if attachment %}<p class="field-help">Tersimpan: <a href="{% url 'invoice_attachment' invoice.pk %}">{{ attachment.filename }}</a>. {% if not payment_locked %}Pilih file baru untuk mengganti.{% endif %}</p>{% endif %}{% endif %}
+        {% if field.name == 'total_rp' %}<p class="field-help">Nominal lengkap, misalnya 500.000.000. Invoice baru otomatis muncul di Payment.</p>{% endif %}
       </div>{% endif %}{% endfor %}
     </div>
   </section>

@@ -62,6 +62,15 @@ unduh serta penggantian lampiran tersedia pada invoice. Purchasing mengisi dan
 melakukan ACC, Direktur melihat serta mengunduh, dan Admin mengelola akun serta
 melihat riwayat. Hak akses juga diperiksa pada server.
 
+Menu **Payment** menampilkan tagihan langsung dari invoice. Purchasing wajib
+mengisi total tagihan positif; format seperti `500.000.000` didukung. Semua role
+dapat melihat posisi, riwayat, bukti, dan mengunduh Excel dua sheet. Hanya Direktur
+dapat mencatat **Lunas/Cicil**, dengan bukti wajib per transaksi. Admin dapat
+membuat akun **Accounting** untuk akses baca dan rekap. Status pembayaran berdiri
+sendiri dari penyelesaian PO. Invoice lama ditandai **Perlu rekonsiliasi** sampai
+posisi pembayaran dapat diverifikasi. Detail migrasi `0009`, backup lokal, serta
+hasil dan batas verifikasi tersedia di [Payment Invoice](docs/PAYMENT_INVOICE.md).
+
 Detail U-01 sampai U-09 dari PRD diterapkan sebagai **default implementasi yang
 masih berupa usulan**, bukan keputusan yang sudah disetujui pengguna. Pilihan,
 kompatibilitas data lama, dan hasil verifikasi dijelaskan di

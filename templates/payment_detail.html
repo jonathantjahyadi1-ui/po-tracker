@@ -1,0 +1,12 @@
+{% extends 'base.html' %}{% load tracker %}
+{% block content %}
+<div class="page-head"><div><a class="back" href="{% url 'payment_list' %}">Payment</a><h1>{{ invoice.nomor }}</h1><p>{{ invoice.vendor.name }} · Tanggal invoice {{ invoice.tanggal|date:'d M Y' }}</p></div>
+<div class="row-actions">{% if attachment %}<a class="button" href="{% url 'invoice_attachment' invoice.pk %}">Unduh invoice</a>{% endif %}{% if can_pay %}<a class="button primary" href="{% url 'payment_create' invoice.pk %}">Bayar</a>{% endif %}</div></div>
+{% if invoice.dibatalkan %}<p class="help-callout">Invoice dibatalkan.</p>{% endif %}
+<section class="panel form-section" aria-label="Posisi pembayaran">{% include 'partials/payment_summary.html' %}</section>
+<section class="panel section-gap"><div class="panel-head"><div><h2>Riwayat pembayaran</h2><p>Setiap transaksi menyimpan bukti sendiri. Tanggal pembayaran terpisah dari waktu pencatatan.</p></div></div>
+<div class="table-wrap"><table class="payment-history"><thead><tr><th>Tanggal pembayaran</th><th class="num">Nominal transaksi</th><th>Jenis</th><th>Bukti</th><th>Direktur pencatat</th><th>Waktu dicatat (WIB)</th></tr></thead><tbody>
+{% for payment in payments %}<tr><td class="nowrap">{{ payment.payment_date|date:'d M Y' }}</td><td class="num">Rp {{ payment.amount|indo }}</td><td>{{ payment.get_kind_display }}</td><td><div class="row-actions"><a href="{% url 'payment_proof' payment.pk %}" target="_blank" rel="noopener">Buka bukti</a><a href="{% url 'payment_proof' payment.pk %}?download=1">Unduh</a></div><span class="field-help proof-filename">{{ payment.proof_filename }}</span></td><td>{% firstof payment.recorded_by.get_full_name payment.recorded_by.username %}</td><td class="nowrap">{{ payment.created_at|date:'d M Y H:i:s' }}</td></tr>
+{% empty %}<tr><td class="empty" colspan="6">{% if summary.status_key == 'reconciliation' %}Belum ada riwayat pembayaran terverifikasi dalam aplikasi.{% else %}Belum ada pembayaran tercatat.{% endif %}</td></tr>{% endfor %}
+</tbody></table></div></section>
+{% endblock %}

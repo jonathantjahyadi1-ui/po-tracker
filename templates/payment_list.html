@@ -1,0 +1,30 @@
+{% extends 'base.html' %}{% load tracker l10n %}
+{% block content %}
+<div class="page-head"><div><h1>Payment</h1><p>Tagihan invoice vendor, cicilan, dan bukti pembayaran.</p></div>
+  {% if not filter_error %}<a class="button" href="{% url 'payment_export' %}{% if filter_query %}?{{ filter_query }}{% endif %}">Download Data</a>{% endif %}
+</div>
+<form method="get" class="payment-filters" aria-label="Filter Payment">
+  <div class="field"><label for="payment-search">Nomor invoice / vendor</label><input id="payment-search" type="search" name="q" value="{{ filters.q }}" placeholder="Cari invoice atau vendor"></div>
+  <div class="field"><label for="payment-status">Status</label><select id="payment-status" name="status"><option value="">Semua status</option>{% for value,label in statuses %}<option value="{{ value }}" {% if filters.status == value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></div>
+  <fieldset class="payment-period"><legend>Periode Invoice</legend>
+    <div class="field"><label class="sr-only" for="payment-from">Awal Periode Invoice</label><input id="payment-from" type="date" name="date_from" value="{{ filters.date_from|date:'Y-m-d' }}" aria-label="Awal Periode Invoice"></div>
+    <span>s.d.</span>
+    <div class="field"><label class="sr-only" for="payment-to">Akhir Periode Invoice</label><input id="payment-to" type="date" name="date_to" value="{{ filters.date_to|date:'Y-m-d' }}" aria-label="Akhir Periode Invoice"></div>
+  </fieldset>
+  <div class="row-actions"><button class="button primary" type="submit">Terapkan</button><a class="button" href="{% url 'payment_list' %}">Reset</a></div>
+</form>
+{% if filter_error %}<p class="form-error-summary" role="alert">{{ filter_error }}</p>{% endif %}
+<section class="panel"><div class="panel-head"><h2>{{ page_obj.paginator.count }} invoice</h2><p>Invoice lama dengan posisi pembayaran yang belum pasti ditandai Perlu rekonsiliasi.</p></div>
+<div class="table-wrap"><table class="payment-table"><thead><tr><th>Invoice</th><th>Vendor</th><th>Tanggal invoice</th><th class="num">Total tagihan</th><th class="num">Total dibayar</th><th class="num">Sisa tagihan</th><th>Progres</th><th>Status</th><th>Aksi</th></tr></thead><tbody>
+{% for invoice in page_obj %}<tr>
+  <td><a class="ref" href="{% url 'payment_detail' invoice.pk %}">{{ invoice.nomor }}</a></td><td>{{ invoice.vendor.name }}</td><td class="nowrap">{{ invoice.tanggal|date:'d M Y' }}</td>
+  <td class="num">Rp {{ invoice.total_rp|indo }}</td>
+  <td class="num">{% if invoice.payment.paid != None %}Rp {{ invoice.payment.paid|indo }}{% else %}—{% endif %}</td>
+  <td class="num">{% if invoice.payment.remaining != None %}Rp {{ invoice.payment.remaining|indo }}{% else %}—{% endif %}</td>
+  <td>{% if invoice.payment.progress != None %}<div class="payment-progress"><progress max="100" value="{{ invoice.payment.progress|unlocalize }}" aria-label="Progres pembayaran {{ invoice.nomor }}"></progress><span>{{ invoice.payment.progress|floatformat:1 }}%</span></div>{% else %}<span class="muted">Belum terverifikasi</span>{% endif %}</td>
+  <td><span class="status payment-{{ invoice.payment.status_key }}">{{ invoice.payment.status }}</span></td>
+  <td><div class="row-actions"><a class="button small" href="{% url 'payment_detail' invoice.pk %}">Lihat Detail</a>{% if can_pay and invoice.payment.status_key == 'unpaid' or can_pay and invoice.payment.status_key == 'dicicil' %}<a class="button small primary" href="{% url 'payment_create' invoice.pk %}">Bayar</a>{% endif %}</div></td>
+</tr>{% empty %}<tr><td class="empty" colspan="9">Tidak ada invoice yang sesuai. Invoice baru akan muncul setelah disimpan Purchasing.</td></tr>{% endfor %}
+</tbody></table></div></section>
+{% if page_obj.has_other_pages %}<nav class="pagination section-gap" aria-label="Halaman Payment">{% if page_obj.has_previous %}<a class="button small" href="?{{ filter_query }}&amp;page={{ page_obj.previous_page_number }}">Sebelumnya</a>{% endif %}<span>Halaman {{ page_obj.number }} dari {{ page_obj.paginator.num_pages }}</span>{% if page_obj.has_next %}<a class="button small" href="?{{ filter_query }}&amp;page={{ page_obj.next_page_number }}">Berikutnya</a>{% endif %}</nav>{% endif %}
+{% endblock %}
