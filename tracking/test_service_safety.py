@@ -20,11 +20,11 @@ from .services import (
     po_status_many,
     putuskan_alokasi,
     simpan_invoice,
-    tautkan_po,
     terima_alokasi,
     ubah_roll_invoice,
 )
 from .size_services import rekonsiliasi_ukuran, simpan_ukuran
+from .test_size_helpers import assign_test_po as tautkan_po
 from .test_size_helpers import record_single_size, ship_single_size
 
 
@@ -253,9 +253,9 @@ class ServiceSafetyTests(TestCase):
         pos = [Po.objects.create(nomor=f'PO EMPTY {index}', cmt=self.cmt) for index in range(20)]
         with CaptureQueriesContext(connection) as captured:
             summaries = po_status_many(pos)
-        self.assertLessEqual(len(captured), 4)
+        self.assertLessEqual(len(captured), 9)
         for po in pos:
-            self.assertEqual(summaries[po.pk]['code'], 'belum_ada_hasil')
+            self.assertEqual(summaries[po.pk]['code'], 'dalam_produksi')
             self.assertFalse(summaries[po.pk]['is_done'])
         self.assertEqual(po_status_many([]), {})
 
@@ -266,10 +266,10 @@ class ServiceSafetyTests(TestCase):
         KirimGudang.objects.create(po=po, color=other_color, tanggal=self.today, pcs=10)
         summary = po_status(po)
         by_color = {row['color_id']: row for row in summary['rows']}
-        self.assertEqual(summary['code'], 'lebih_kirim')
-        self.assertEqual(summary['over'], 10)
+        self.assertEqual(summary['code'], 'patokan_belum')
+        self.assertEqual(summary['actual_over'], 10)
         self.assertFalse(by_color[self.roll.color_id]['has_result'])
-        self.assertIsNone(by_color[self.roll.color_id]['remaining'])
+        self.assertEqual(by_color[self.roll.color_id]['remaining'], 100)
         self.assertEqual(by_color[other_color.pk]['hasil'], 0)
 
     def test_single_material_legacy_null_is_not_guessed_until_mapping(self):
@@ -313,7 +313,7 @@ class ServiceSafetyTests(TestCase):
             self.user,
         )
         record_single_size(po, self.roll.color, 120, self.user)
-        self.assertEqual(po_status(po)['remaining'], 60)
+        self.assertEqual(po_status(po)['remaining'], 40)
         self.assertEqual(
             (historical.pk, shipment.pk),
             (Hasil.objects.get(po=po).pk, KirimGudang.objects.get(po=po).pk),

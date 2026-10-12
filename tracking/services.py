@@ -366,7 +366,9 @@ def po_status_many(pos):
                 status_label='Lebih kirim',
                 is_done=False,
             )
-    return summaries
+    from .production_services import apply_production_status
+
+    return apply_production_status(summaries, ids)
 
 
 def po_status(po):
@@ -582,7 +584,9 @@ def terima_alokasi(alokasi, roll_ids, tgl_terima, user):
 
 
 @transaction.atomic
-def tautkan_po(alokasi, nomor_po, user, produk=''):
+def tautkan_po(alokasi, nomor_po, user, produk='', product=None):
+    from .production_services import lock_po, selected_product, take_snapshots
+
     require_purchasing(user)
     alokasi = (
         Alokasi.objects.select_for_update(of=('self',))
@@ -610,10 +614,11 @@ def tautkan_po(alokasi, nomor_po, user, produk=''):
         raise ValidationError('Nomor PO baru dapat diisi setelah seluruh roll pengiriman Diterima.')
     if not alokasi.cmt.active or alokasi.cmt.kind != 'cmt':
         raise ValidationError('CMT tujuan sudah nonaktif atau tidak valid.')
+    product = selected_product(product)
     po, created = Po.objects.get_or_create(
-        nomor=nomor, defaults={'cmt': alokasi.cmt, 'produk': produk}
+        nomor=nomor, defaults={'cmt': alokasi.cmt, 'produk': product.name, 'product': product}
     )
-    po = Po.objects.select_for_update().get(pk=po.pk)
+    po = lock_po(po.pk)
     if po.cmt_id != alokasi.cmt_id:
         if po.cmt_id is None:
             raise ValidationError(
@@ -623,6 +628,7 @@ def tautkan_po(alokasi, nomor_po, user, produk=''):
         raise ValidationError(f'{po.nomor} sudah dimiliki CMT lain.')
     alokasi.po = po
     alokasi.save(update_fields=['po'])
+    take_snapshots(po, product, {(roll.material_id, roll.color_id) for roll in rolls}, user)
     log(
         user,
         'isi PO' if created else 'tautkan PO',
@@ -634,19 +640,10 @@ def tautkan_po(alokasi, nomor_po, user, produk=''):
 
 @transaction.atomic
 def ubah_produk_po(po, produk, user, cmt=None):
+    from .production_services import change_draft_product
+
     require_purchasing(user)
-    po = Po.objects.select_for_update().get(pk=po.pk)
-    if cmt is not None and po.cmt_id != cmt.pk:
-        raise ValidationError('PO tidak dimiliki CMT ini.')
-    produk = ' '.join(produk.split())
-    if len(produk) > 160:
-        raise ValidationError('Nama produk maksimal 160 karakter.')
-    if po.produk != produk:
-        before = po.produk
-        po.produk = produk
-        po.save(update_fields=['produk'])
-        log(user, 'ubah produk', po.nomor, f'{before or "—"} → {produk or "—"}')
-    return po
+    return change_draft_product(po, produk, user, cmt=cmt)
 
 
 def _invoice_panels(groups):
@@ -861,13 +858,17 @@ def simpan_invoice(data, groups, user, invoice=None):
                 )
             for raw in row['yards']:
                 try:
-                    yard = Decimal(raw).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+                    yard = Decimal(str(raw))
                 except (InvalidOperation, TypeError, ValueError):
                     raise ValidationError(f'{material.name} / {color.name}: yard tidak valid.')
                 if not yard.is_finite() or yard <= 0 or yard >= Decimal('100000000'):
                     raise ValidationError(
                         f'{material.name} / {color.name}: '
                         'yard harus positif dan kurang dari 100.000.000.'
+                    )
+                if yard != yard.quantize(Decimal('0.000001')):
+                    raise ValidationError(
+                        'Yard maksimal 6 angka pecahan; nilai tidak dibulatkan otomatis.'
                     )
                 next_urut[key] += 1
                 pending.append(
@@ -997,9 +998,12 @@ def ubah_po_invoice(invoice, submitted, user):
 
 @transaction.atomic
 def simpan_hasil(po, color, pcs, user, material=None):
+    from .production_services import lock_po, require_open_unit
+
     require_purchasing(user)
-    po = Po.objects.select_for_update().get(pk=po.pk)
+    po = lock_po(po.pk)
     material = production_material(po, color, material)
+    require_open_unit(po, material, color)
     require_mapped_production(po, color)
     if not isinstance(pcs, int) or isinstance(pcs, bool) or pcs < 0:
         raise ValidationError('Hasil harus bilangan bulat tidak negatif.')
@@ -1054,11 +1058,14 @@ def kirim_gudang(po, color, data, user, material=None):
 
 @transaction.atomic
 def map_legacy_production(po, color, material, user):
+    from .production_services import lock_po, require_open_unit
+
     require_purchasing(user)
-    po = Po.objects.select_for_update().get(pk=po.pk)
+    po = lock_po(po.pk)
     if material is None:
         raise ValidationError('Pilih bahan tujuan untuk data hasil/kiriman lama.')
     material = production_material(po, color, material)
+    require_open_unit(po, material, color, allow_legacy_metadata=True)
     legacy_results = Hasil.objects.filter(po=po, color=color, material=None)
     legacy_shipments = KirimGudang.objects.filter(po=po, color=color, material=None)
     result_count, shipment_count = legacy_results.count(), legacy_shipments.count()

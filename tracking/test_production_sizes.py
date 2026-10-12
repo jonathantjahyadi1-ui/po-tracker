@@ -25,8 +25,10 @@ from .models import (
     Roll,
     User,
 )
+from .production_services import change_draft_product, save_delivery_decision, set_legacy_snapshots
 from .services import kirim_gudang, po_status, po_status_many, simpan_hasil
 from .size_services import kirim_ukuran, production_size_data, rekonsiliasi_ukuran, simpan_ukuran
+from .test_size_helpers import standard_product
 
 
 def size_fixture(owner):
@@ -58,6 +60,7 @@ def size_fixture(owner):
         alokasi=owner.allocation,
         tgl_terima=owner.today,
     )
+    set_legacy_snapshots(owner.po, standard_product(owner.user, usage='2'), owner.user)
 
 
 class ProductionSizeTests(TestCase):
@@ -126,6 +129,7 @@ class ProductionSizeTests(TestCase):
         self.assertEqual(len(po_status(self.po)['rows']), 1)
 
     def test_duplicate_normalization_is_atomic(self):
+        baseline_logs = Log.objects.count()
         for duplicate in ('s', ' S ', 'S'):
             with (
                 self.subTest(duplicate=duplicate),
@@ -133,7 +137,7 @@ class ProductionSizeTests(TestCase):
             ):
                 self.save([{'label': 'S', 'pcs': 20}, {'label': duplicate, 'pcs': 10}])
             self.assertFalse(Hasil.objects.exists())
-            self.assertFalse(Log.objects.exists())
+            self.assertEqual(Log.objects.count(), baseline_logs)
 
     def test_blank_negative_fraction_and_invalid_label_are_rejected(self):
         for value in ('', None, -1, 1.5, '1.0', True, 'x', 2147483648):
@@ -247,7 +251,10 @@ class ProductionSizeTests(TestCase):
         with self.assertRaisesMessage(ValidationError, 'rincian ukuran'):
             simpan_hasil(self.po, self.color, 60, self.user)
 
-    def test_done_only_with_positive_complete_production(self):
+    def test_done_requires_explicit_final_and_all_units(self):
+        change_draft_product(
+            self.po, standard_product(self.user, name='Produk target 200', usage='0.5'), self.user
+        )
         self.assertFalse(po_status(self.po)['is_done'])
         hasil = self.save([{'label': 'S', 'pcs': 0}])
         self.assertFalse(po_status(self.po)['is_done'])
@@ -255,6 +262,8 @@ class ProductionSizeTests(TestCase):
         self.ship(hasil, S=150)
         self.assertEqual(po_status(self.po)['remaining'], 50)
         self.ship(hasil, request_id='last', S=50)
+        self.assertFalse(po_status(self.po)['is_done'])
+        save_delivery_decision(self.po, self.po.production_units.get().pk, 'final', '', self.user)
         self.assertTrue(po_status(self.po)['is_done'])
         other = Master.objects.create(kind='color', name='Other color')
         Roll.objects.create(
@@ -335,17 +344,18 @@ class ProductionSizeTests(TestCase):
             self.assertFalse(KirimUkuran.objects.exists())
         self.assertEqual(po_status(self.po)['terkirim'], 30)
 
-    def test_old_completed_po_keeps_status_before_and_after_split(self):
+    def test_legacy_size_split_keeps_delivery_open_until_explicit_final(self):
         hasil, shipment = self.legacy(50)
-        self.assertTrue(po_status(self.po)['is_done'])
+        self.assertFalse(po_status(self.po)['is_done'])
         self.save()
-        self.assertTrue(po_status(self.po)['is_done'])
+        self.assertFalse(po_status(self.po)['is_done'])
         rekonsiliasi_ukuran(
             self.po,
             hasil.pk,
             [{'shipment_id': shipment.pk, 'sizes': self.amounts(hasil, S=20, M=20, L=10)}],
             self.user,
         )
+        save_delivery_decision(self.po, self.po.production_units.get().pk, 'final', '', self.user)
         self.assertTrue(po_status(self.po)['is_done'])
 
     def test_other_po_size_item_and_transaction_ids_cannot_be_used(self):
@@ -389,7 +399,7 @@ class ProductionSizeTests(TestCase):
         Hasil.objects.filter(pk=hasil.pk).update(pcs=999)
         with CaptureQueriesContext(connection) as queries:
             summary = po_status_many([self.po])[self.po.pk]
-        self.assertLessEqual(len(queries), 6)
+        self.assertLessEqual(len(queries), 9)
         self.assertEqual(summary['hasil'], 50)
 
     def test_ajax_save_returns_server_totals_and_preserves_errors(self):
@@ -507,9 +517,11 @@ class ProductionSizeTests(TestCase):
             ]
         )
         summary = po_status(self.po)
-        self.assertEqual((summary['hasil'], summary['terkirim'], summary['over']), (50, 50, 10))
+        self.assertEqual(
+            (summary['hasil'], summary['terkirim'], summary['actual_over']), (50, 50, 10)
+        )
         self.assertFalse(summary['is_done'])
-        self.assertEqual(summary['rows'][0]['status_key'], 'lebih_kirim')
+        self.assertEqual(summary['rows'][0]['status_key'], 'dalam_pengiriman')
 
 
 class ProductionSizeConcurrencyTests(TransactionTestCase):

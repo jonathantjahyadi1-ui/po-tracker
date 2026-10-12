@@ -24,7 +24,15 @@ from django.views.decorators.http import require_GET
 from openpyxl import Workbook
 from openpyxl.utils.exceptions import InvalidFileException
 
-from .forms import AccountForm, AssignPoForm, InvoiceForm, LoginForm, PoForm, ReceiveForm
+from .forms import (
+    AccountForm,
+    AssignPoForm,
+    InvoiceForm,
+    LoginForm,
+    MaterialUsageFormSet,
+    PoForm,
+    ReceiveForm,
+)
 from .models import (
     Alokasi,
     Invoice,
@@ -32,11 +40,18 @@ from .models import (
     KirimGudang,
     Log,
     Master,
+    MaterialUsage,
     Po,
     Roll,
     User,
 )
 from .parsers import import_yards, parse_yards
+from .production_services import (
+    save_delivery_decision,
+    save_material_usages,
+    selected_product,
+    set_legacy_snapshots,
+)
 from .services import (
     ajukan_alokasi,
     batalkan_invoice,
@@ -173,7 +188,7 @@ def dashboard(request):
         .annotate(rolls=Count('roll'))
     )
     pos = balance_flags(list(Po.objects.select_related('cmt').order_by('-id')))
-    unbalanced = [po for po in pos if po.summary['code'] == 'kurang_kirim']
+    unbalanced = [po for po in pos if po.summary['code'] in ('kurang_kirim', 'menunggu_keterangan')]
     return render(
         request,
         'dashboard.html',
@@ -189,9 +204,13 @@ def dashboard(request):
             'unbalanced_count': len(unbalanced),
             'waiting': waiting[:5],
             'unbalanced': unbalanced[:5],
-            'remaining_pcs': sum(po.summary['remaining'] for po in pos),
+            'remaining_pcs': sum(
+                po.summary['remaining'] for po in pos if not po.summary['is_done']
+            ),
             'incomplete_count': sum(
-                bool(po.summary['missing_results']) or po.summary['unmapped_material'] for po in pos
+                (bool(po.summary['missing_results']) or po.summary['unmapped_material'])
+                and not po.summary['is_done']
+                for po in pos
             ),
         },
     )
@@ -239,6 +258,77 @@ def master_page(request):
             'kinds': Master.Kind.choices,
             'items': Master.objects.filter(kind=tab),
         },
+    )
+
+
+@access('purchasing', 'direktur')
+def material_usage_page(request):
+    product_id = (
+        request.POST.get('product') if request.method == 'POST' else request.GET.get('product')
+    )
+    product = None
+    error = None
+    conflict = False
+    if product_id:
+        try:
+            product = selected_product(product_id)
+        except ValidationError as exc:
+            error = '; '.join(exc.messages)
+    entries = (
+        list(MaterialUsage.objects.filter(product=product).select_related('updated_by'))
+        if product
+        else []
+    )
+    initial = [
+        {
+            'id': u.pk,
+            'material': u.material_id,
+            'usage': format(u.usage_yard_per_pcs, 'f').rstrip('0').rstrip('.'),
+            'active': u.active,
+        }
+        for u in entries
+    ]
+    formset = MaterialUsageFormSet(
+        request.POST if request.method == 'POST' else None, initial=initial
+    )
+    if request.method == 'POST':
+        write_only(request)
+        if product is None:
+            error = error or 'Pilih produk dari Master Produk.'
+        elif formset.is_valid():
+            try:
+                rows = [form.cleaned_data for form in formset if form.cleaned_data.get('material')]
+                save_material_usages(product, rows, request.user)
+                messages.success(
+                    request, 'Pemakaian paten tersimpan. Snapshot transaksi lama tetap digunakan.'
+                )
+                return redirect(f'/master/pemakaian-paten/?product={product.pk}')
+            except (ValidationError, OperationalError) as exc:
+                conflict = isinstance(exc, OperationalError)
+                if conflict:
+                    if connection.vendor != 'sqlite' or 'locked' not in str(exc).lower():
+                        raise
+                    error = (
+                        'Master sedang diperbarui pengguna lain. '
+                        'Coba simpan kembali; input tetap tersedia.'
+                    )
+                else:
+                    error = '; '.join(exc.messages)
+    for form in formset:
+        identity = form.initial.get('id')
+        form.audit_entry = next((u for u in entries if u.pk == identity), None)
+    return render(
+        request,
+        'material_usage.html',
+        {
+            'title': 'Pemakaian Paten Bahan',
+            'active': 'master',
+            'product': product,
+            'products': Master.objects.filter(kind='product', active=True),
+            'formset': formset,
+            'usage_error': error,
+        },
+        status=409 if conflict else 400 if request.method == 'POST' else 200,
     )
 
 
@@ -913,7 +1003,7 @@ def cmt_detail(request, pk):
                     allocation,
                     assign_form.cleaned_data['nomor_po'],
                     request.user,
-                    produk=assign_form.cleaned_data['produk'],
+                    product=assign_form.cleaned_data['product'],
                 )
                 messages.success(
                     request, f'Nomor {assigned_po.nomor} terhubung ke pengiriman {allocation.pk}.'
@@ -921,7 +1011,7 @@ def cmt_detail(request, pk):
             elif action == 'product':
                 if not allocation.po_id:
                     raise ValidationError('Isi nomor PO sebelum mengubah nama produk.')
-                ubah_produk_po(allocation.po, request.POST.get('produk', ''), request.user, cmt=cmt)
+                ubah_produk_po(allocation.po, request.POST.get('product'), request.user, cmt=cmt)
                 messages.success(request, 'Nama produk tersimpan.')
             else:
                 raise ValidationError('Aksi CMT tidak dikenal.')
@@ -990,6 +1080,19 @@ def cmt_detail(request, pk):
             and bool(allocation.roll_list)
             and all(roll.status == 'diterima' for roll in allocation.roll_list)
         )
+        preview_rows = {}
+        for roll in allocation.roll_list:
+            key = (roll.material_id, roll.color_id)
+            if key not in preview_rows:
+                preview_rows[key] = {
+                    'material_id': roll.material_id,
+                    'material__name': roll.material.name,
+                    'color_id': roll.color_id,
+                    'color__name': roll.color.name,
+                    'yard': 0,
+                }
+            preview_rows[key]['yard'] += roll.yard
+        allocation.estimate_preview = list(preview_rows.values())
         allocation.material_labels = ', '.join(
             dict.fromkeys(
                 f'{roll.material.name} / {roll.color.name}' for roll in allocation.roll_list
@@ -1016,6 +1119,15 @@ def cmt_detail(request, pk):
             'posted': posted,
             'selected_rolls': request.POST.getlist('rolls') if cmt_error else [],
             'page_obj': page_obj,
+            'products': Master.objects.filter(kind='product', active=True),
+            'usage_preview': list(
+                MaterialUsage.objects.filter(
+                    active=True, product__active=True, material__active=True
+                ).values('product_id', 'material_id', 'usage_yard_per_pcs')
+            ),
+            'allocation_preview': {
+                str(a.pk): a.estimate_preview for a in allocations if a.can_assign
+            },
         },
     )
 
@@ -1032,7 +1144,9 @@ def po_list(request):
         grouped[po.cmt_id].append(po)
     for cmt in cmts:
         cmt.po_count = len(grouped[cmt.pk])
-        cmt.short_count = sum(po.summary['code'] == 'kurang_kirim' for po in grouped[cmt.pk])
+        cmt.short_count = sum(
+            po.summary['code'] in ('kurang_kirim', 'menunggu_keterangan') for po in grouped[cmt.pk]
+        )
         cmt.shortage_count = cmt.short_count
     return render(
         request,
@@ -1057,7 +1171,9 @@ def render_po_list(request, cmt=None, legacy=False):
     filter_value = {'selesai': 'done', 'balance': 'done', 'belum': 'kurang_kirim'}.get(
         filter_value, filter_value
     )
-    if filter_value:
+    if filter_value == 'needs_attention':
+        pos = [po for po in pos if po.summary['code'] in ('menunggu_keterangan', 'kurang_kirim')]
+    elif filter_value:
         pos = [po for po in pos if po.summary['code'] == filter_value]
     page_obj = Paginator(pos, 30).get_page(request.GET.get('page'))
     return render(
@@ -1074,8 +1190,14 @@ def render_po_list(request, cmt=None, legacy=False):
             'page_obj': page_obj,
             'po_count': len(pos),
             'status_choices': [
+                ('needs_attention', 'Perlu tindak lanjut selisih'),
+                ('menunggu_keterangan', 'Menunggu Keterangan'),
                 ('kurang_kirim', 'Kurang kirim'),
-                ('done', 'Done'),
+                ('done', 'Selesai'),
+                ('selesai_selisih', 'Selesai dengan Selisih'),
+                ('patokan_belum', 'Patokan belum ditetapkan'),
+                ('dalam_produksi', 'Dalam produksi'),
+                ('dalam_pengiriman', 'Dalam pengiriman'),
                 ('belum_ada_hasil', 'Belum ada hasil'),
                 ('belum_lengkap', 'Belum lengkap'),
                 ('lebih_kirim', 'Lebih kirim'),
@@ -1160,7 +1282,16 @@ def size_response(po):
     return {
         'summary': {
             k: summary[k]
-            for k in ('hasil', 'terkirim', 'remaining', 'over', 'code', 'label', 'is_done')
+            for k in (
+                'hasil',
+                'terkirim',
+                'remaining',
+                'over',
+                'code',
+                'label',
+                'is_done',
+                'estimate',
+            )
         },
         'rows': [
             {
@@ -1174,6 +1305,9 @@ def size_response(po):
                     'status_key',
                     'status_label',
                     'pemakaian',
+                    'estimate',
+                    'difference',
+                    'usage_snapshot',
                 )
             }
             for row in rows
@@ -1231,6 +1365,16 @@ def po_detail(request, pk):
                             po.nomor,
                             f'{previous or "belum diisi"} → {locked.tgl_order or "belum diisi"}',
                         )
+            elif action == 'set_patent':
+                set_legacy_snapshots(po, request.POST.get('product'), request.user)
+            elif action == 'delivery_decision':
+                save_delivery_decision(
+                    po,
+                    request.POST.get('unit_id'),
+                    request.POST.get('continuation'),
+                    request.POST.get('discrepancy_note', ''),
+                    request.user,
+                )
             elif action == 'sizes':
                 color = get_object_or_404(Master, pk=request.POST.get('color'), kind='color')
                 material = get_object_or_404(
@@ -1309,9 +1453,14 @@ def po_detail(request, pk):
                 )
             if ajax:
                 errors = error.messages if isinstance(error, ValidationError) else [str(error)]
-                return JsonResponse({'errors': errors}, status=409 if conflict else 400)
-            messages.error(request, str(error))
-            detail_error = str(error)
+                return JsonResponse(
+                    {'errors': errors, 'field_errors': getattr(error, 'message_dict', {})},
+                    status=409 if conflict else 400,
+                )
+            detail_error = (
+                '; '.join(error.messages) if isinstance(error, ValidationError) else str(error)
+            )
+            messages.error(request, detail_error)
             po.refresh_from_db()
     rolls = list(
         po_rolls(po)
@@ -1323,6 +1472,16 @@ def po_detail(request, pk):
     size_data = production_size_data(po)
     for row in rows:
         row['size_data'] = size_data.get(row['row_key'], {})
+        row['decision_continuation'] = (
+            request.POST.get('continuation')
+            if detail_error
+            and action == 'delivery_decision'
+            and row['unit']
+            and request.POST.get('unit_id') == str(row['unit'].pk)
+            else row['unit'].continuation
+            if row['unit']
+            else None
+        )
         row['size_summary'] = ' · '.join(
             f'{s["label"]} {s["pcs"]}' for s in row['size_data'].get('sizes', [])[:3]
         )
@@ -1352,6 +1511,8 @@ def po_detail(request, pk):
             'active': 'po',
             'po': po,
             'summary': po.summary,
+            'products': Master.objects.filter(kind='product', active=True),
+            'decision_error': action == 'delivery_decision' and bool(detail_error),
             'rolls': rolls,
             'rows': rows,
             'size_data': size_data,
@@ -1587,6 +1748,13 @@ def po_export(request, pk):
             'Status bahan / warna',
             *[date.isoformat() for date in dates],
             'Pemakaian (yard/pcs)',
+            'Pemakaian Paten (yard/pcs)',
+            'Estimasi (pcs)',
+            'Selisih terkirim - estimasi (pcs)',
+            'Kelanjutan Pengiriman',
+            'Keterangan Selisih',
+            'Final oleh',
+            'Waktu final',
         ],
         [
             [
@@ -1609,6 +1777,17 @@ def po_export(request, pk):
                 row['status_label'],
                 *[row['sent'].get(date, 0) for date in dates],
                 row['pemakaian'] if row['pemakaian'] is not None else '',
+                row['usage_snapshot'],
+                row['estimate'],
+                row['difference'],
+                row['unit'].get_continuation_display() if row['unit'] else '',
+                row['unit'].discrepancy_note if row['unit'] else '',
+                row['unit'].finalized_by.username
+                if row['unit'] and row['unit'].finalized_by
+                else '',
+                timezone.localtime(row['unit'].finalized_at).strftime('%Y-%m-%d %H:%M:%S')
+                if row['unit'] and row['unit'].finalized_at
+                else '',
             ]
             for row in rows
         ],

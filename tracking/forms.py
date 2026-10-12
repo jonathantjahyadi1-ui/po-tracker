@@ -2,7 +2,7 @@ from django import forms
 from django.contrib.auth.forms import AuthenticationForm
 from django.utils import timezone
 
-from .models import InvoicePayment, Po, User
+from .models import InvoicePayment, Master, Po, User
 from .money import format_money, parse_money
 from .uploads import validate_document
 
@@ -102,7 +102,47 @@ class ReceiveForm(forms.Form):
 
 class AssignPoForm(forms.Form):
     nomor_po = forms.CharField(label='Nomor PO', max_length=80)
-    produk = forms.CharField(label='Nama produk', max_length=160, required=False)
+    product = forms.ModelChoiceField(
+        label='Produk', queryset=Master.objects.filter(kind='product', active=True)
+    )
+
+
+class UsageField(forms.CharField):
+    widget = forms.TextInput(attrs={'inputmode': 'decimal', 'placeholder': 'Contoh: 2,5'})
+
+    def clean(self, value):
+        from .production_services import parse_usage
+
+        return parse_usage(super().clean(value))
+
+
+class MaterialUsageForm(forms.Form):
+    id = forms.IntegerField(required=False, widget=forms.HiddenInput)
+    material = forms.ModelChoiceField(
+        label='Bahan', queryset=Master.objects.filter(kind='material')
+    )
+    usage = UsageField(label='Pemakaian Paten (yard/pcs)')
+    active = forms.BooleanField(label='Aktif', required=False, initial=True)
+
+
+class UsageFormSet(forms.BaseFormSet):
+    def clean(self):
+        super().clean()
+        if any(self.errors):
+            return
+        seen = set()
+        for form in self.forms:
+            material = form.cleaned_data.get('material')
+            if material is None:
+                continue
+            if material.pk in seen:
+                form.add_error('material', 'Bahan duplikat; edit satu entri untuk kombinasi ini.')
+            seen.add(material.pk)
+
+
+MaterialUsageFormSet = forms.formset_factory(
+    MaterialUsageForm, formset=UsageFormSet, extra=1, max_num=500, validate_max=True
+)
 
 
 class AccountForm(forms.Form):

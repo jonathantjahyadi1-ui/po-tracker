@@ -46,6 +46,7 @@ class Master(Dated):
         MATERIAL = 'material', 'Bahan'
         COLOR = 'color', 'Warna'
         WAREHOUSE = 'warehouse', 'Gudang'
+        PRODUCT = 'product', 'Produk'
 
     kind = models.CharField(max_length=12, choices=Kind.choices)
     name = models.CharField(max_length=160)
@@ -64,6 +65,10 @@ class Master(Dated):
 
 
 class Po(Dated):
+    product = models.ForeignKey(
+        Master, on_delete=models.PROTECT, null=True, blank=True, related_name='product_orders'
+    )
+    legacy_completed = models.BooleanField(default=False)
     nomor = models.CharField(max_length=80, unique=True)
     cmt = models.ForeignKey(
         Master, on_delete=models.PROTECT, null=True, blank=True, related_name='purchase_orders'
@@ -241,7 +246,7 @@ class Roll(Dated):
         Master, on_delete=models.PROTECT, related_name='+', null=True, blank=True
     )
     urut = models.PositiveIntegerField()
-    yard = models.DecimalField(max_digits=10, decimal_places=2)
+    yard = models.DecimalField(max_digits=14, decimal_places=6)
     status = models.CharField(max_length=12, choices=Status.choices, default=Status.TERSEDIA)
     alokasi = models.ForeignKey(Alokasi, on_delete=models.PROTECT, null=True, blank=True)
     tgl_kirim = models.DateField(null=True, blank=True)
@@ -326,6 +331,70 @@ class Log(Dated):
     aksi = models.CharField(max_length=60)
     objek = models.CharField(max_length=200)
     detail = models.TextField(blank=True)
+
+
+class MaterialUsage(Dated):
+    product = models.ForeignKey(Master, on_delete=models.PROTECT, related_name='material_usages')
+    material = models.ForeignKey(Master, on_delete=models.PROTECT, related_name='+')
+    usage_yard_per_pcs = models.DecimalField(max_digits=20, decimal_places=8)
+    active = models.BooleanField(default=True)
+    created_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name='+')
+    updated_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name='+')
+    updated_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ['material__name', 'pk']
+        constraints = [
+            models.UniqueConstraint(fields=['product', 'material'], name='usage_product_material'),
+            models.CheckConstraint(condition=Q(usage_yard_per_pcs__gt=0), name='usage_positive'),
+        ]
+
+
+class ProductionUnit(Dated):
+    class Continuation(models.TextChoices):
+        UNDECIDED = 'undecided', 'Belum ditentukan'
+        FOLLOW_UP = 'follow_up', 'Masih ada kiriman menyusul'
+        FINAL = 'final', 'Pengiriman sudah final'
+
+    po = models.ForeignKey(Po, on_delete=models.PROTECT, related_name='production_units')
+    product = models.ForeignKey(Master, on_delete=models.PROTECT, related_name='+')
+    material = models.ForeignKey(Master, on_delete=models.PROTECT, related_name='+')
+    color = models.ForeignKey(Master, on_delete=models.PROTECT, related_name='+')
+    usage_source = models.ForeignKey(MaterialUsage, on_delete=models.PROTECT, related_name='units')
+    usage_snapshot = models.DecimalField(max_digits=20, decimal_places=8)
+    snapshot_at = models.DateTimeField(default=timezone.now)
+    rounding = models.CharField(max_length=7, default='HALF_UP', editable=False)
+    continuation = models.CharField(
+        max_length=12, choices=Continuation.choices, default=Continuation.UNDECIDED
+    )
+    discrepancy_note = models.TextField(blank=True)
+    finalized_by = models.ForeignKey(
+        User, on_delete=models.PROTECT, related_name='+', null=True, blank=True
+    )
+    finalized_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=['po', 'material', 'color'], name='unit_po_material_color'
+            ),
+            models.CheckConstraint(condition=Q(usage_snapshot__gt=0), name='unit_usage_positive'),
+            models.CheckConstraint(condition=Q(rounding='HALF_UP'), name='unit_rounding_half_up'),
+            models.CheckConstraint(
+                condition=Q(continuation__in=['undecided', 'follow_up', 'final']),
+                name='unit_continuation_valid',
+            ),
+            models.CheckConstraint(
+                condition=(
+                    Q(continuation='final', finalized_at__isnull=False, finalized_by__isnull=False)
+                    | (
+                        ~Q(continuation='final')
+                        & Q(finalized_at__isnull=True, finalized_by__isnull=True)
+                    )
+                ),
+                name='unit_finalization_consistent',
+            ),
+        ]
 
 
 class HasilUkuran(Dated):

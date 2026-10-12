@@ -34,6 +34,7 @@ from .models import (
     normalize_po,
 )
 from .parsers import import_yards, parse_yards, suspicious_yards
+from .production_services import save_delivery_decision, save_material_usages
 from .services import (
     ajukan_alokasi,
     done,
@@ -44,12 +45,12 @@ from .services import (
     po_status,
     putuskan_alokasi,
     simpan_invoice,
-    tautkan_po,
     terima_alokasi,
     yard_po,
 )
 from .size_services import rekonsiliasi_ukuran, simpan_ukuran
-from .test_size_helpers import record_single_size, ship_single_size
+from .test_size_helpers import assign_test_po as tautkan_po
+from .test_size_helpers import record_single_size, ship_single_size, standard_product
 
 
 class ParserTests(TestCase):
@@ -230,7 +231,7 @@ class WorkflowTests(TestCase):
             'action': 'assign_po',
             'allocation': allocation.pk,
             'nomor_po': 'po-109',
-            'produk': 'Kemeja',
+            'product': standard_product(self.user, name='Kemeja').pk,
         }
         self.client.post(cmt_url, assignment)
         self.assertEqual(Po.objects.count(), 0)
@@ -303,6 +304,7 @@ class WorkflowTests(TestCase):
                 target,
                 {
                     'action': 'assign_po',
+                    'product': standard_product(self.user).pk,
                     'allocation': oldest.pk,
                     'nomor_po': 'PO OLDEST',
                     'produk': 'Produk awal',
@@ -326,6 +328,7 @@ class WorkflowTests(TestCase):
                 url,
                 {
                     'action': 'assign_po',
+                    'product': standard_product(self.user).pk,
                     'allocation': invalid,
                     'nomor_po': 'PO INJECTED',
                 },
@@ -414,41 +417,44 @@ class WorkflowTests(TestCase):
         for pcs in (430, 247, 250, 145):
             self.shipment(po, pcs)
         self.assertEqual(done(po, self.color), 0)
+        save_delivery_decision(
+            po, po.production_units.get().pk, 'final', 'Simulasi selisih dari patokan', self.user
+        )
         self.assertTrue(po_balance(po))
         self.assertTrue(po_status(po)['is_done'])
         self.assertEqual(
             set(Roll.objects.filter(alokasi__po=po).values_list('status', flat=True)), {'diterima'}
         )
 
-    def test_200_150_50_done_then_230_reopens(self):
+    def test_actual_result_edits_do_not_change_snapshot_or_finalize_delivery(self):
         _, po = self.ready_po(self.rolls[:1])
         record_single_size(po, self.color, 200, self.user)
         self.shipment(po, 150)
         state = po_status(po)
         self.assertEqual(
-            (state['label'], state['remaining'], state['terkirim']), ('Kurang kirim', 50, 150)
+            (state['label'], state['remaining'], state['terkirim']), ('Dalam pengiriman', 0, 150)
         )
+        self.assertEqual(state['rows'][0]['estimate'], 118)
         self.shipment(po, 50)
-        self.assertEqual(po_status(po)['label'], 'Done')
-        self.assertTrue(po_balance(po))
+        self.assertFalse(po_balance(po))
         record_single_size(po, self.color, 230, self.user)
-        self.assertEqual((po_status(po)['label'], po_status(po)['remaining']), ('Kurang kirim', 30))
+        self.assertEqual(po_status(po)['rows'][0]['estimate'], 118)
         self.assertEqual(Hasil.objects.get(po=po, color=self.color).pcs, 230)
+        save_delivery_decision(po, po.production_units.get().pk, 'final', '', self.user)
+        self.assertTrue(po_balance(po))
 
     def test_missing_zero_and_per_color_anomalies_not_done(self):
         blue = Master.objects.create(kind='color', name='Blue')
         Roll.objects.filter(pk=self.rolls[1].pk).update(color=blue)
         _, po = self.ready_po(self.rolls[:2])
-        self.assertEqual(po_status(po)['label'], 'Belum ada hasil')
+        self.assertEqual(po_status(po)['label'], 'Dalam produksi')
         self.assertTrue(all(row['hasil'] is None for row in po_status(po)['rows']))
         record_single_size(po, self.color, 0, self.user)
-        self.assertEqual(po_status(po)['label'], 'Belum lengkap')
         record_single_size(po, blue, 0, self.user)
-        self.assertEqual(po_status(po)['label'], 'Belum ada hasil produksi')
+        self.assertEqual(po_status(po)['label'], 'Dalam produksi')
         self.assertFalse(po_balance(po))
         record_single_size(po, self.color, 100, self.user)
         record_single_size(po, blue, 100, self.user)
-        # Direct insertion represents retained legacy anomalies, bypassing new-write validation.
         material = self.rolls[0].material
         KirimGudang.objects.create(
             po=po, material=material, color=self.color, tanggal=self.today, pcs=90
@@ -459,18 +465,22 @@ class WorkflowTests(TestCase):
         state = po_status(po)
         self.assertEqual((state['hasil'], state['terkirim']), (200, 200))
         self.assertEqual(
-            (state['label'], state['remaining'], state['over']), ('Lebih kirim', 10, 10)
+            (state['label'], state['remaining'], state['over']), ('Menunggu Keterangan', 36, 0)
         )
+        self.assertEqual(state['actual_over'], 10)
         self.assertFalse(state['is_done'])
 
-    def test_zero_color_can_balance_alongside_positive_color(self):
+    def test_zero_color_requires_its_own_shortage_explanation(self):
         blue = Master.objects.create(kind='color', name='Blue')
         Roll.objects.filter(pk=self.rolls[1].pk).update(color=blue)
         _, po = self.ready_po(self.rolls[:2])
         record_single_size(po, self.color, 0, self.user)
         record_single_size(po, blue, 100, self.user)
         self.shipment(po, 100, color=blue)
-        self.assertEqual(po_status(po)['label'], 'Done')
+        self.assertFalse(po_balance(po))
+        for unit in po.production_units.all():
+            save_delivery_decision(po, unit.pk, 'final', 'Hasil di bawah estimasi', self.user)
+        self.assertEqual(po_status(po)['label'], 'Selesai dengan Selisih')
 
     def test_excess_and_result_reduction_rejected(self):
         _, po = self.ready_po(self.rolls[:1])
@@ -629,7 +639,12 @@ class WorkflowTests(TestCase):
             (reverse('allocation_detail', args=[allocation.pk]), {'action': 'acc'}),
             (
                 reverse('cmt_detail', args=[self.cmt.pk]),
-                {'action': 'assign_po', 'allocation': allocation.pk, 'nomor_po': 'PO OTHER'},
+                {
+                    'action': 'assign_po',
+                    'product': standard_product(self.user).pk,
+                    'allocation': allocation.pk,
+                    'nomor_po': 'PO OTHER',
+                },
             ),
             (
                 reverse('cmt_detail', args=[self.cmt.pk]),
@@ -926,6 +941,7 @@ class WorkflowTests(TestCase):
         self.assertContains(page, 'q=LATEST')
 
     def test_status_exports_http_shipment_retry_consistency(self):
+        standard_product(self.user, usage='0.591')
         _, po = self.ready_po(self.rolls[:1])
         self.client.force_login(self.user)
         detail = reverse('po_detail', args=[po.pk])
@@ -949,13 +965,14 @@ class WorkflowTests(TestCase):
         self.client.post(detail, payload)
         self.client.post(detail, payload)
         self.assertEqual(KirimGudang.objects.filter(po=po).count(), 1)
+        save_delivery_decision(po, po.production_units.get().pk, 'follow_up', '', self.user)
         self.assertEqual(po_status(po)['remaining'], 50)
         for url in (
             detail,
             reverse('po_cmt_list', args=[self.cmt.pk]),
             reverse('cmt_detail', args=[self.cmt.pk]),
         ):
-            self.assertContains(self.client.get(url), 'Kurang kirim')
+            self.assertContains(self.client.get(url), 'Kurang Kirim')
         dashboard = self.client.get(reverse('dashboard'))
         self.assertEqual(dashboard.context['unbalanced_count'], 1)
         self.assertEqual(dashboard.context['remaining_pcs'], 50)
@@ -964,7 +981,7 @@ class WorkflowTests(TestCase):
         self.assertEqual(export.status_code, 200)
         book = load_workbook(BytesIO(export.content), read_only=True)
         values = [cell for sheet in book for row in sheet.values for cell in row]
-        for expected in ('Kurang kirim', self.cmt.name, 50):
+        for expected in ('Kurang Kirim', self.cmt.name, 50):
             self.assertIn(expected, values)
         book.close()
         book = load_workbook(
@@ -976,8 +993,10 @@ class WorkflowTests(TestCase):
         book.close()
         payload.update(sizes=json.dumps([{'id': size.pk, 'pcs': 50}]), request_id=str(uuid4()))
         self.client.post(detail, payload)
-        self.assertEqual(po_status(po)['label'], 'Done')
-        self.assertContains(self.client.get(detail), 'Done')
+        self.assertFalse(po_status(po)['is_done'])
+        save_delivery_decision(po, po.production_units.get().pk, 'final', '', self.user)
+        self.assertEqual(po_status(po)['label'], 'Selesai')
+        self.assertContains(self.client.get(detail), 'Selesai')
 
     def test_export_distinguishes_missing_zero_and_per_color_excess(self):
         blue = Master.objects.create(kind='color', name='Blue')
@@ -996,9 +1015,9 @@ class WorkflowTests(TestCase):
 
         data = records()
         self.assertIsNone(data['Cream']['Hasil produksi (pcs)'])
-        self.assertIsNone(data['Cream']['Sisa kirim (pcs)'])
+        self.assertEqual(data['Cream']['Sisa kirim (pcs)'], 118)
         self.assertEqual(data['Blue']['Hasil produksi (pcs)'], 0)
-        self.assertEqual({row['Status PO'] for row in data.values()}, {'Belum lengkap'})
+        self.assertEqual({row['Status PO'] for row in data.values()}, {'Dalam produksi'})
         record_single_size(po, self.color, 100, self.user)
         record_single_size(po, blue, 100, self.user)
         material = self.rolls[0].material
@@ -1009,9 +1028,9 @@ class WorkflowTests(TestCase):
             po=po, material=material, color=blue, tanggal=self.today, pcs=110
         )
         data = records()
-        self.assertEqual(data['Cream']['Sisa kirim (pcs)'], 10)
-        self.assertEqual(data['Blue']['Lebih kirim (pcs)'], 10)
-        self.assertEqual({row['Status PO'] for row in data.values()}, {'Lebih kirim'})
+        self.assertEqual(data['Cream']['Sisa kirim (pcs)'], 28)
+        self.assertEqual(data['Blue']['Lebih kirim (pcs)'], 0)
+        self.assertEqual({row['Status PO'] for row in data.values()}, {'Menunggu Keterangan'})
 
     def test_attachment_upload_download_and_replacement(self):
         self.client.force_login(self.user)
@@ -1164,6 +1183,12 @@ class MaterialProductionTests(TestCase):
         allocation = ajukan_alokasi(ids, self.cmt, self.user)
         putuskan_alokasi(allocation, 'acc', self.user, tgl_kirim=self.today)
         terima_alokasi(allocation, ids, self.today, self.user)
+        product = standard_product(self.user)
+        for material, usage in [(self.cotton, '0.4'), (self.polyester, '1.29')]:
+            entry = product.material_usages.get(material=material)
+            save_material_usages(
+                product, [{'id': entry.pk, 'material': material, 'usage': usage}], self.user
+            )
         self.po = tautkan_po(allocation, 'PO MATERIAL', self.user)
         self.client.force_login(self.user)
 
@@ -1233,7 +1258,7 @@ class MaterialProductionTests(TestCase):
             self.result(self.polyester, 39)
         self.result(self.cotton, 230)
         self.assertEqual(Hasil.objects.get(po=self.po, material=self.polyester).pcs, 70)
-        self.assertEqual(po_status(self.po)['remaining'], 110)
+        self.assertEqual(po_status(self.po)['remaining'], 80)  # Actual results do not replace E.
         self.assertEqual(KirimGudang.objects.filter(po=self.po).count(), 2)
 
     def test_ambiguous_and_unrelated_material_selection_rejected(self):
@@ -1255,18 +1280,22 @@ class MaterialProductionTests(TestCase):
         self.assertFalse(Hasil.objects.filter(po=self.po).exists())
         self.assertFalse(KirimGudang.objects.filter(po=self.po).exists())
 
-    def test_all_pairs_needed_for_done_and_result_increase_reopens(self):
+    def test_all_pairs_require_final_and_actual_result_edits_preserve_estimate(self):
         self.result(self.cotton, 200)
         self.result(self.polyester, 70)
         self.ship(self.cotton, 200)
-        self.assertEqual(self.rows()[(self.cotton.pk, self.color.pk)]['status_label'], 'Done')
+        self.assertEqual(
+            self.rows()[(self.cotton.pk, self.color.pk)]['status_label'], 'Dalam pengiriman'
+        )
         self.assertFalse(po_status(self.po)['is_done'])
         self.assertEqual(po_status(self.po)['remaining'], 70)
         self.ship(self.polyester, 70)
-        self.assertTrue(po_status(self.po)['is_done'])
-        self.result(self.cotton, 230)
-        self.assertEqual(po_status(self.po)['remaining'], 30)
         self.assertFalse(po_status(self.po)['is_done'])
+        self.result(self.cotton, 230)
+        self.assertEqual(po_status(self.po)['remaining'], 0)
+        for unit in self.po.production_units.all():
+            save_delivery_decision(self.po, unit.pk, 'final', '', self.user)
+        self.assertTrue(po_status(self.po)['is_done'])
 
     def test_same_color_excess_cannot_cancel_other_material_shortage(self):
         self.result(self.cotton, 100)
@@ -1279,8 +1308,8 @@ class MaterialProductionTests(TestCase):
         )
         summary = po_status(self.po)
         self.assertEqual((summary['hasil'], summary['terkirim']), (200, 200))
-        self.assertEqual((summary['remaining'], summary['over']), (10, 10))
-        self.assertEqual(summary['label'], 'Lebih kirim')
+        self.assertEqual((summary['remaining'], summary['over']), (110, 40))
+        self.assertEqual(summary['label'], 'Menunggu Keterangan')
         self.assertFalse(summary['is_done'])
 
     def test_shipment_replay_identity_is_bound_to_material(self):
@@ -1426,6 +1455,9 @@ class MaterialProductionTests(TestCase):
             self.user,
         )
         self.ship(self.cotton, 50)
+        self.assertFalse(po_status(self.po)['is_done'])
+        for unit in self.po.production_units.all():
+            save_delivery_decision(self.po, unit.pk, 'final', 'Hasil di bawah estimasi', self.user)
         self.assertTrue(po_status(self.po)['is_done'])
 
     def test_mapping_rejects_existing_target_and_wrong_role_without_merging_totals(self):

@@ -1,6 +1,6 @@
 {% extends 'base.html' %}
 {% block content %}
-<div class="page-head"><h1>Master</h1></div>
+<div class="page-head"><h1>Master</h1><a class="button" href="{% url 'material_usage' %}">Pemakaian Paten Bahan</a></div>
 <nav class="tabs" aria-label="Jenis master">{% for kind,label in kinds %}
   <a href="?tab={{ kind }}" {% if tab == kind %}aria-current="page"{% endif %}>{{ label }}</a>
 {% endfor %}</nav>

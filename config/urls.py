@@ -8,6 +8,7 @@ urlpatterns = [
     path('logout/', views.sign_out, name='logout'),
     path('', views.dashboard, name='dashboard'),
     path('master/', views.master_page, name='master'),
+    path('master/pemakaian-paten/', views.material_usage_page, name='material_usage'),
     path('vendor/', views.vendor_list, name='vendor_list'),
     path('vendor/<int:pk>/', views.vendor_detail, name='vendor_detail'),
     path('invoice/baru/', views.invoice_edit, name='invoice_new'),

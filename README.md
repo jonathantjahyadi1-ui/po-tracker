@@ -42,20 +42,27 @@ jalankan `manage.py seed_contoh` saat `DEBUG=true`.
    Seluruh roll dalam pengajuan langsung Dikirim. Penolakan wajib menyertakan alasan.
 4. Buka CMT tujuan dan catat tanggal serta roll yang sudah diterima. Penerimaan
    sebagian diperbolehkan. Isi nomor PO setelah seluruh roll dalam pengiriman
-   diterima; nama produk opsional juga dikelola di CMT.
+   diterima. Pilih produk dari Master; pemakaian paten setiap produk/bahan harus
+   diisi lewat **Master → Pemakaian Paten Bahan**. Snapshot dan estimasi diambil saat
+   bahan dihubungkan ke PO. Penggantian produk draft juga dikelola di CMT.
 5. Buka **PO → CMT → nomor PO**. Informasi PO hanya mengubah tanggal order.
    Klik **Isi ukuran/Rincian ukuran** untuk mencatat total hasil S/M/L atau ukuran
    custom pada setiap item bahan–warna. Total item dihitung otomatis; angka baru
    mengganti hasil ukuran tersebut. Tabel utama tetap satu baris per item.
-6. Tambah transaksi kiriman gudang dengan jumlah per ukuran. Hasil 200 pcs dan kiriman 150 pcs menghasilkan
-   **Kurang kirim 50 pcs**. Tambahan 50 pcs menghasilkan **Done** jika setiap pasangan
-   sudah lengkap dan seluruh hasilnya terkirim. Hasil yang dinaikkan menjadi 230 pcs
-   membuat PO kembali **Kurang kirim 30 pcs**.
+6. Tambah transaksi kiriman gudang dengan jumlah per ukuran. Pembanding selisih
+   adalah estimasi dari total yard alokasi dan snapshot patokan, bukan hasil aktual.
+   Pilih kelanjutan kiriman pada setiap unit. **Pengiriman sudah final** menutup unit;
+   kekurangan memerlukan Keterangan Selisih dan menjadi **Selesai dengan Selisih**.
+   PO selesai setelah semua unit final. Perubahan hasil aktual tidak mengubah estimasi.
 
 Kiriman baru tidak boleh melebihi sisa setiap ukuran dan hasil ukuran tidak boleh
 dikurangi di bawah kiriman ukuran tersebut. Hasil kosong berbeda dari hasil nol. Kelebihan pada
 data lama tetap ditampilkan sebagai anomali per bahan/warna; jumlah bersih antarpasangan
-tidak dapat membuat PO Done. Tidak ada tombol selesai manual atau panel Roll PO.
+tidak dapat menutupi kekurangan unit lain. Pengiriman tidak selesai otomatis hanya
+karena terkirim sudah mencapai estimasi. Panel Roll PO tetap tidak digunakan.
+
+Panduan patokan, snapshot, status/finalisasi, migrasi `0010–0011`, dan data lama
+tersedia di [Pemakaian Paten Bahan](docs/MATERIAL_USAGE.md).
 
 File invoice PDF, JPG, atau PNG (maksimal 10 MB) tetap disimpan di database;
 unduh serta penggantian lampiran tersedia pada invoice. Purchasing mengisi dan
@@ -157,3 +164,10 @@ Verifikasi fitur ukuran tanggal 8 Oktober 2026: 101 tes dijalankan, 93 lulus dan
 8 tes PostgreSQL dilewati. Migrasi lokal 0008 telah diterapkan setelah backup;
 semua baris lama tetap identik. Panduan dan batas verifikasi ada di
 [ukuran per warna](docs/PRODUCTION_SIZES.md).
+
+Verifikasi fitur pemakaian paten tanggal 12 Oktober 2026: 172 tes dijalankan,
+164 lulus dan 8 tes khusus PostgreSQL dilewati. Pemeriksaan Django, konsistensi
+migrasi, lint Python, sintaks JavaScript, serta smoke test form HTTP lulus.
+Migrasi lokal sampai `0011` diterapkan setelah backup tanpa mengubah jumlah transaksi
+dan akun. Batas verifikasi browser dan petunjuk migrasi server dijelaskan di
+[Pemakaian Paten Bahan](docs/MATERIAL_USAGE.md).

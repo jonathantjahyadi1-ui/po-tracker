@@ -1,0 +1,22 @@
+{% extends 'base.html' %}{% load static %}
+{% block content %}
+<script src="{% static 'material-usage.js' %}" defer></script>
+<div class="page-head"><div><a class="back" href="{% url 'master' %}?tab=product">Master Produk</a><h1>Pemakaian Paten Bahan</h1><p>Patokan manual per produk dan bahan. Satuan tetap yard/pcs.</p></div></div>
+{% if usage_error %}<div class="form-error-summary" role="alert">{{ usage_error }}</div>{% endif %}
+<form method="get" class="inline-form panel">
+<div class="field"><label for="usage-product">Produk</label><select id="usage-product" name="product" required><option value="">Pilih produk</option>{% for item in products %}<option value="{{ item.pk }}" {% if product.pk == item.pk %}selected{% endif %}>{{ item.name }}</option>{% endfor %}</select></div><button class="button" type="submit">Tampilkan bahan</button>
+{% if request.user.role == 'purchasing' %}<a href="{% url 'master' %}?tab=product">Tambah produk</a>{% endif %}
+</form>
+{% if product %}<section class="panel form-section section-gap"><h2>{{ product.name }}</h2><p class="field-help">Isi angka setiap bahan, misalnya 2,5. Perubahan hanya berlaku untuk snapshot baru.</p>
+<form method="post" data-usage-form data-submit-form>{% csrf_token %}<input type="hidden" name="product" value="{{ product.pk }}">{{ formset.management_form }}{{ formset.non_form_errors }}
+<div data-usage-rows>{% for form in formset %}<div class="usage-row">
+{{ form.id }}<div class="field"><label for="{{ form.material.id_for_label }}">Bahan</label>{{ form.material }}{{ form.material.errors }}</div>
+<div class="field"><label for="{{ form.usage.id_for_label }}">Pemakaian Paten (yard/pcs)</label>{{ form.usage }}{{ form.usage.errors }}</div>
+<div class="field usage-active"><label for="{{ form.active.id_for_label }}">{{ form.active }} Aktif</label></div>
+{% if form.audit_entry %}<p class="field-help usage-audit">Terakhir diubah {{ form.audit_entry.updated_by.username }} · {{ form.audit_entry.updated_at|date:"d M Y H:i" }}</p>{% endif %}
+</div>{% endfor %}</div>
+{% if request.user.role == 'purchasing' %}<template id="empty-usage-row"><div class="usage-row">{{ formset.empty_form.id }}<div class="field"><label for="{{ formset.empty_form.material.id_for_label }}">Bahan</label>{{ formset.empty_form.material }}</div><div class="field"><label for="{{ formset.empty_form.usage.id_for_label }}">Pemakaian Paten (yard/pcs)</label>{{ formset.empty_form.usage }}</div><div class="field usage-active"><label for="{{ formset.empty_form.active.id_for_label }}">{{ formset.empty_form.active }} Aktif</label></div><button type="button" class="link-button" data-remove-usage>Hapus baris baru</button></div></template>
+<div class="form-actions"><button class="button" type="button" data-add-usage>Tambah Bahan</button><button class="button primary" type="submit">Simpan patokan</button></div>
+{% else %}<p class="field-help">Hanya Purchasing dapat mengubah patokan.</p><script>document.querySelectorAll('[data-usage-form] input,[data-usage-form] select').forEach(el => el.disabled = true);</script>{% endif %}
+</form></section>{% else %}<p class="help-callout section-gap">Pilih produk untuk melihat patokan tiap bahan. Produk dan bahan dibuat melalui Master.</p>{% endif %}
+{% endblock %}

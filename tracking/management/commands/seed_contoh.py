@@ -6,6 +6,7 @@ from django.core.management.base import BaseCommand, CommandError
 from django.utils import timezone
 
 from tracking.models import Invoice, Master, User
+from tracking.production_services import save_delivery_decision, save_material_usages
 from tracking.services import (
     ajukan_alokasi,
     kirim_gudang,
@@ -57,9 +58,14 @@ class Command(BaseCommand):
         putuskan_alokasi(allocation, 'acc', user, tgl_kirim=today - timedelta(days=20))
         ids = list(invoice.roll_set.values_list('id', flat=True))
         terima_alokasi(allocation, ids, today - timedelta(days=19), user)
-        po = tautkan_po(allocation, 'PO 109', user, produk='Kemeja contoh')
         color = Master.objects.get(kind='color', name='Cream')
         material = invoice.roll_set.select_related('material').first().material
+        product = master('product', 'Kemeja contoh')
+        # Explicit simulation standard, never inferred from actual production.
+        save_material_usages(
+            product, [{'material': material, 'usage': '1.65', 'active': True}], user
+        )
+        po = tautkan_po(allocation, 'PO 109', user, product=product)
         hasil = simpan_ukuran(po, color, material, [{'label': 'All Size', 'pcs': 1072}], user)
         size = hasil.sizes.get()
         for index, pcs in enumerate([430, 247, 250, 145]):
@@ -74,6 +80,13 @@ class Command(BaseCommand):
                 user,
                 material=material,
             )
+        save_delivery_decision(
+            po,
+            po.production_units.get().pk,
+            'final',
+            'Simulasi: hasil berbeda dari estimasi bahan.',
+            user,
+        )
         self.stdout.write(
             self.style.SUCCESS('Data contoh dibuat. Akun: contoh_purchasing / contoh123')
         )

@@ -16,3 +16,14 @@ def indo(value):
 @register.filter
 def get(mapping, key):
     return mapping.get(key, '') if mapping else ''
+
+
+@register.filter
+def precise(value):
+    if value is None:
+        return '—'
+    return (
+        format(Decimal(value), 'f').rstrip('0').rstrip('.').replace('.', ',')
+        if Decimal(value) % 1
+        else str(int(Decimal(value)))
+    )

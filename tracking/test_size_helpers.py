@@ -5,9 +5,37 @@ Only tests choose this size: migration and application code never infer a size.
 
 from uuid import uuid4
 
-from .models import Hasil
+from .models import Hasil, Master, MaterialUsage, Po, normalize_po
 from .services import production_material, require_purchasing, simpan_hasil
 from .size_services import kirim_ukuran, simpan_ukuran
+
+
+def standard_product(user, name='Produk uji', usage='1'):
+    """Explicit manual standards for historical regression fixtures, never application defaults."""
+    product, _ = Master.objects.get_or_create(kind='product', name=name)
+    for material in Master.objects.filter(kind='material'):
+        MaterialUsage.objects.get_or_create(
+            product=product,
+            material=material,
+            defaults={
+                'usage_yard_per_pcs': usage,
+                'created_by': user,
+                'updated_by': user,
+            },
+        )
+    return product
+
+
+def assign_test_po(allocation, number, user, produk=''):
+    from .services import tautkan_po
+
+    existing = Po.objects.filter(nomor=normalize_po(number)).first()
+    product = (
+        existing.product
+        if existing and not produk
+        else standard_product(user, produk or 'Produk uji')
+    )
+    return tautkan_po(allocation, number, user, product=product)
 
 
 def record_single_size(po, color, pcs, user, material=None):

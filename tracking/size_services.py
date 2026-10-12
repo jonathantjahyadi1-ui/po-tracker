@@ -8,7 +8,8 @@ from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
 from django.db.models import F, Q, Sum
 
-from .models import Hasil, HasilUkuran, KirimGudang, KirimUkuran, Po, normalize_name
+from .models import Hasil, HasilUkuran, KirimGudang, KirimUkuran, normalize_name
+from .production_services import lock_po, require_open_unit
 from .services import (
     limited_text,
     log,
@@ -82,8 +83,9 @@ def get_item(po, material, color, hasil_id=None):
 @transaction.atomic
 def simpan_ukuran(po, color, material, rows, user, hasil_id=None):
     require_purchasing(user)
-    po = Po.objects.select_for_update().get(pk=po.pk)
+    po = lock_po(po.pk)
     material, hasil = get_item(po, material, color, hasil_id)
+    require_open_unit(po, material, color, allow_legacy_metadata=True)
     rows = sequence(rows)
     if not rows:
         raise ValidationError(
@@ -126,6 +128,11 @@ def simpan_ukuran(po, color, material, rows, user, hasil_id=None):
     if deleted & set(shipped):
         raise ValidationError('Ukuran dengan histori kiriman tidak boleh dihapus.')
     total = sum(row['pcs'] for row in parsed)
+    if (po.legacy_completed or po.selesai) and (hasil is None or total != hasil.pcs):
+        raise ValidationError(
+            'PO historis sudah selesai; total hasil tetap '
+            'dan hanya rincian ukuran dapat dilengkapi.'
+        )
     if total > 2147483647:
         raise ValidationError('Total hasil terlalu besar.')
     if hasil and not hasil.sizes_complete and total != hasil.pcs:
@@ -209,7 +216,7 @@ def quantities(rows, sizes):
 @transaction.atomic
 def kirim_ukuran(po, color, material, data, rows, user, hasil_id=None):
     require_purchasing(user)
-    po = Po.objects.select_for_update().get(pk=po.pk)
+    po = lock_po(po.pk)
     material, hasil = get_item(po, material, color, hasil_id)
     if hasil is None or not hasil.sizes_complete:
         raise ValidationError('Isi rincian ukuran hasil produksi sebelum mencatat kiriman baru.')
@@ -232,6 +239,8 @@ def kirim_ukuran(po, color, material, data, rows, user, hasil_id=None):
         'catatan': limited_text(data.get('catatan', ''), 'Catatan kiriman', 4000),
         'pcs': sum(amounts.values()),
     }
+    if payload['pcs'] > 2147483647:
+        raise ValidationError('Total kiriman maksimal 2147483647 pcs.')
     previous = KirimGudang.objects.filter(request_id=identity).first()
     if previous:
         old_amounts = dict(previous.sizes.values_list('ukuran_id', 'pcs'))
@@ -244,6 +253,7 @@ def kirim_ukuran(po, color, material, data, rows, user, hasil_id=None):
         ):
             raise ValidationError('Identitas permintaan sudah digunakan untuk kiriman berbeda.')
         return previous
+    require_open_unit(po, material, color)
     if pending_shipments(hasil).exists():
         raise ValidationError(
             'Kiriman lama belum dirinci per ukuran; lengkapi rekonsiliasi terlebih dahulu.'
@@ -291,10 +301,11 @@ def kirim_ukuran(po, color, material, data, rows, user, hasil_id=None):
 @transaction.atomic
 def rekonsiliasi_ukuran(po, hasil_id, rows, user):
     require_purchasing(user)
-    po = Po.objects.select_for_update().get(pk=po.pk)
+    po = lock_po(po.pk)
     hasil = Hasil.objects.filter(pk=row_id(hasil_id), po=po).first()
     if hasil is None or not hasil.sizes_complete:
         raise ValidationError('Isi rincian ukuran pada item PO ini terlebih dahulu.')
+    require_open_unit(po, hasil.material_id, hasil.color_id, allow_legacy_metadata=True)
     require_mapped_production(po, hasil.color)
     sizes = {s.pk: s for s in hasil.sizes.all()}
     shipments = {s.pk: s for s in item_shipments(hasil).prefetch_related('sizes')}

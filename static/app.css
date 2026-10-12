@@ -416,3 +416,15 @@ dialog[open] { animation:panel-enter var(--motion-panel) ease-out; }
 @media(prefers-reduced-motion:reduce) { .size-detail { animation:none; } }
 
 .size-detail { position:sticky; left:0; }
+/* Manual usage standards and per-unit shipment closure. */
+.usage-row { display: grid; grid-template-columns: minmax(160px, 1fr) minmax(180px, 1fr) auto; gap: 16px; align-items: end; padding: 16px 0; border-bottom: 1px solid var(--border, #e4e4e7); }
+.usage-row[hidden] { display: none; }
+.usage-active { padding-bottom: 10px; }
+.usage-active input { width: auto; }
+.usage-audit { grid-column: 1 / -1; }
+.estimate-unit { padding: 20px 0; border-top: 1px solid var(--border, #e4e4e7); margin-top: 16px; }
+.estimate-values { display: grid; grid-template-columns: repeat(auto-fit, minmax(145px, 1fr)); gap: 16px; margin: 16px 0; }
+.estimate-values dt { font-size: 12px; color: var(--muted, #64748b); margin-bottom: 6px; }
+.estimate-values dd { margin: 0; font-weight: 600; overflow-wrap: anywhere; }
+.delivery-decision-form { margin-top: 16px; }
+@media (max-width: 640px) { .usage-row { grid-template-columns: 1fr; align-items: stretch; } .usage-audit { grid-column: auto; } .estimate-values { grid-template-columns: 1fr 1fr; } }

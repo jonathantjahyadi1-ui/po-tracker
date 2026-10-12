@@ -15,14 +15,14 @@ def parse_number(token):
         token = token.replace(thousands_mark, '').replace(decimal_mark, '.')
     elif ',' in token:
         token = token.replace(',', '.')
-    elif '.' in token and len(token.rsplit('.', 1)[1]) >= 3:
+    elif re.fullmatch(r'\d{1,3}(?:\.\d{3})+', token):
         token = token.replace('.', '')
-    if not re.fullmatch(r'\d+(?:\.\d{1,2})?', token):
+    if not re.fullmatch(r'\d+(?:\.\d{1,6})?', token):
         raise InvalidOperation
     value = Decimal(token)
-    if value <= 0 or value > Decimal('99999999.99'):
+    if value <= 0 or value >= Decimal('100000000'):
         raise InvalidOperation
-    return value.quantize(Decimal('0.01'))
+    return value if value.as_tuple().exponent < -2 else value.quantize(Decimal('0.01'))
 
 
 def parse_yards(text):

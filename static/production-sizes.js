@@ -116,6 +116,20 @@ document.addEventListener('DOMContentLoaded', () => {
       main.querySelector('[data-item-remaining]').textContent = row.remaining ?? '—';
       main.querySelector('[data-item-status]').replaceChildren(element('span', row.status_label, 'status ' + row.status_key));
       main.querySelector('[data-item-usage]').textContent = row.pemakaian === null ? '—' : Number(row.pemakaian).toLocaleString('id-ID', {minimumFractionDigits: 2});
+      const estimateUnit = document.querySelector('[data-estimate-unit="' + row.row_key + '"]');
+      if (estimateUnit) {
+        estimateUnit.querySelector('[data-estimate-value]').textContent = row.estimate === null ? '—' : row.estimate + ' pcs';
+        estimateUnit.querySelector('[data-estimate-shipped]').textContent = row.shipped + ' pcs';
+        estimateUnit.querySelector('[data-estimate-difference]').textContent = row.difference === null ? '—' :
+          (row.difference > 0 ? '+' : '') + row.difference + ' pcs';
+        const status = estimateUnit.querySelector('[data-estimate-status]');
+        if (status) status.textContent = row.status_label;
+        estimateUnit.querySelector('[data-estimate-warning]').textContent = row.estimate === 0 ?
+          'Alokasi belum mencapai estimasi 1 pcs. Pengiriman tetap terbuka sampai dipilih final.' :
+          row.remaining > 0 && !['done', 'selesai_selisih'].includes(row.status_key) ?
+          'Total terkirim ' + row.shipped + ' pcs dari estimasi ' + row.estimate + ' pcs. Kurang ' + row.remaining +
+          ' pcs. Tentukan apakah ada kiriman menyusul atau isi keterangan untuk menyelesaikan pengiriman.' : '';
+      }
       main.querySelector('[data-legacy-size-note]').hidden = !data.pending.length;
       const toggle = toggleFor(row.row_key);
       if (toggle && openKey !== row.row_key) toggle.textContent = data.sizes_complete ? 'Rincian ukuran' : 'Isi ukuran';
