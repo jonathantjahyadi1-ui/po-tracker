@@ -42,8 +42,9 @@ jalankan `manage.py seed_contoh` saat `DEBUG=true`.
    Seluruh roll dalam pengajuan langsung Dikirim. Penolakan wajib menyertakan alasan.
 4. Buka CMT tujuan dan catat tanggal serta roll yang sudah diterima. Penerimaan
    sebagian diperbolehkan. Isi nomor PO setelah seluruh roll dalam pengiriman
-   diterima. Pilih produk dari Master; pemakaian paten setiap produk/bahan harus
-   diisi lewat **Master → Pemakaian Paten Bahan**. Snapshot dan estimasi diambil saat
+   diterima. Pilih produk dari Master; isi **Pemakaian Paten (yard/pcs)** di sebelah
+   nama saat membuat atau mengubah **Master → Produk**. Patokan khusus per bahan
+   dapat diisi lewat **Master → Pemakaian Paten Bahan**. Snapshot dan estimasi diambil saat
    bahan dihubungkan ke PO. Penggantian produk draft juga dikelola di CMT.
 5. Buka **PO → CMT → nomor PO**. Informasi PO hanya mengubah tanggal order.
    Klik **Isi ukuran/Rincian ukuran** untuk mencatat total hasil S/M/L atau ukuran

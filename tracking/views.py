@@ -14,8 +14,8 @@ from django.contrib.auth.decorators import login_required
 from django.core.cache import cache
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.core.paginator import Paginator
-from django.db import OperationalError, connection, transaction
-from django.db.models import Count, Max, Prefetch, Q, Sum
+from django.db import IntegrityError, OperationalError, connection, transaction
+from django.db.models import Count, F, Max, Prefetch, Q, Sum
 from django.http import HttpResponse, HttpResponseNotAllowed, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
@@ -29,6 +29,7 @@ from .forms import (
     AssignPoForm,
     InvoiceForm,
     LoginForm,
+    MasterForm,
     MaterialUsageFormSet,
     PoForm,
     ReceiveForm,
@@ -49,6 +50,7 @@ from .parsers import import_yards, parse_yards
 from .production_services import (
     save_delivery_decision,
     save_material_usages,
+    save_product_usage,
     selected_product,
     set_legacy_snapshots,
 )
@@ -218,20 +220,39 @@ def dashboard(request):
 
 @access('purchasing', 'direktur')
 def master_page(request):
+    tab = request.GET.get('tab', 'vendor')
+    if tab not in Master.Kind.values:
+        tab = 'vendor'
+    bound_form = None
+    editing_id = None
     if request.method == 'POST':
         write_only(request)
         kind = request.POST.get('kind', '')
-        name = ' '.join(request.POST.get('name', '').split())
-        if kind not in Master.Kind.values or not name:
-            messages.error(request, 'Jenis dan nama wajib diisi.')
-        else:
+        if kind not in Master.Kind.values:
+            messages.error(request, 'Jenis master tidak valid.')
+            return redirect('master')
+        tab = kind
+        editing_id = request.POST.get('id') or None
+        bound_form = MasterForm(request.POST, kind=kind)
+        toggling = request.POST.get('action') == 'toggle'
+        if toggling or bound_form.is_valid():
             try:
                 with transaction.atomic():
-                    pk = request.POST.get('id')
-                    item = get_object_or_404(Master, pk=pk, kind=kind) if pk else Master(kind=kind)
-                    if request.POST.get('action') == 'toggle':
+                    if editing_id and connection.vendor == 'sqlite':
+                        Master.objects.filter(pk=editing_id, kind=kind).update(active=F('active'))
+                    item = (
+                        get_object_or_404(
+                            Master.objects.select_for_update(), pk=editing_id, kind=kind
+                        )
+                        if editing_id
+                        else Master(kind=kind)
+                    )
+                    if toggling:
+                        if not editing_id:
+                            raise ValidationError('Pilih master yang akan diubah statusnya.')
                         item.active = not item.active
                     else:
+                        name = bound_form.cleaned_data['name']
                         if (
                             Master.objects.filter(kind=kind, name__iexact=name)
                             .exclude(pk=item.pk)
@@ -240,14 +261,44 @@ def master_page(request):
                             raise ValidationError('Nama sudah ada dalam daftar ini.')
                         item.name = name
                     item.save()
+                    if kind == Master.Kind.PRODUCT and not toggling:
+                        save_product_usage(item, bound_form.cleaned_data['usage'], request.user)
                     log(request.user, 'ubah master', f'{item.get_kind_display()} {item.name}')
                     messages.success(request, 'Master tersimpan.')
+                return redirect(f'/master/?tab={kind}')
             except ValidationError as error:
-                flash_error(request, error)
-        return redirect(f'/master/?tab={kind}')
-    tab = request.GET.get('tab', 'vendor')
-    if tab not in Master.Kind.values:
-        tab = 'vendor'
+                bound_form.add_error(None, error)
+            except IntegrityError:
+                bound_form.add_error('name', 'Nama sudah ada dalam daftar ini.')
+            except OperationalError:
+                bound_form.add_error(None, 'Data sedang diperbarui. Coba simpan kembali.')
+    items = list(
+        Master.objects.filter(kind=tab).prefetch_related(
+            Prefetch(
+                'material_usages',
+                queryset=MaterialUsage.objects.filter(material__isnull=True),
+                to_attr='product_usages',
+            )
+        )
+    )
+    for item in items:
+        item.product_usage = item.product_usages[0] if item.product_usages else None
+        item.edit_form = (
+            bound_form
+            if str(item.pk) == editing_id
+            else MasterForm(
+                kind=tab,
+                initial={
+                    'name': item.name,
+                    'usage': (
+                        format(item.product_usage.usage_yard_per_pcs, 'f')
+                        if item.product_usage
+                        else ''
+                    ),
+                },
+                auto_id=f'master-{item.pk}-%s',
+            )
+        )
     return render(
         request,
         'master.html',
@@ -255,8 +306,14 @@ def master_page(request):
             'title': 'Master',
             'active': 'master',
             'tab': tab,
+            'tab_label': Master.Kind(tab).label,
             'kinds': Master.Kind.choices,
-            'items': Master.objects.filter(kind=tab),
+            'items': items,
+            'form': (
+                bound_form
+                if bound_form is not None and not editing_id
+                else MasterForm(kind=tab, auto_id='master-%s')
+            ),
         },
     )
 
@@ -275,7 +332,11 @@ def material_usage_page(request):
         except ValidationError as exc:
             error = '; '.join(exc.messages)
     entries = (
-        list(MaterialUsage.objects.filter(product=product).select_related('updated_by'))
+        list(
+            MaterialUsage.objects.filter(product=product, material__isnull=False).select_related(
+                'updated_by'
+            )
+        )
         if product
         else []
     )
@@ -1086,6 +1147,7 @@ def cmt_detail(request, pk):
             if key not in preview_rows:
                 preview_rows[key] = {
                     'material_id': roll.material_id,
+                    'material_active': roll.material.active,
                     'material__name': roll.material.name,
                     'color_id': roll.color_id,
                     'color__name': roll.color.name,
@@ -1121,9 +1183,9 @@ def cmt_detail(request, pk):
             'page_obj': page_obj,
             'products': Master.objects.filter(kind='product', active=True),
             'usage_preview': list(
-                MaterialUsage.objects.filter(
-                    active=True, product__active=True, material__active=True
-                ).values('product_id', 'material_id', 'usage_yard_per_pcs')
+                MaterialUsage.objects.filter(product__active=True).values(
+                    'product_id', 'material_id', 'usage_yard_per_pcs', 'active'
+                )
             ),
             'allocation_preview': {
                 str(a.pk): a.estimate_preview for a in allocations if a.can_assign

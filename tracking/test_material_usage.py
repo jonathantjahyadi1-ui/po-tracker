@@ -3,7 +3,13 @@ from decimal import Decimal
 from uuid import uuid4
 
 from django.core.exceptions import PermissionDenied, ValidationError
-from django.db import OperationalError, close_old_connections, connection, transaction
+from django.db import (
+    IntegrityError,
+    OperationalError,
+    close_old_connections,
+    connection,
+    transaction,
+)
 from django.db.migrations.executor import MigrationExecutor
 from django.test import TestCase, TransactionTestCase, override_settings
 from django.test.utils import CaptureQueriesContext
@@ -31,6 +37,7 @@ from .production_services import (
     parse_usage,
     save_delivery_decision,
     save_material_usages,
+    save_product_usage,
     set_legacy_snapshots,
 )
 from .services import (
@@ -561,6 +568,165 @@ class MaterialUsageTests(TestCase):
         self.assertEqual(response.status_code, 302)
         usage.refresh_from_db()
         self.assertEqual(usage.usage_yard_per_pcs, Decimal('2.75'))
+
+    def test_master_product_requires_positive_usage_and_preserves_invalid_input(self):
+        self.client.force_login(self.user)
+        for value in ['', '0', '-1', 'NaN', '1.123456789']:
+            with self.subTest(usage=value):
+                response = self.client.post(
+                    reverse('master'), {'kind': 'product', 'name': 'Produk baru', 'usage': value}
+                )
+                self.assertEqual(response.status_code, 200)
+                self.assertIn('usage', response.context['form'].errors)
+                self.assertContains(response, 'value="Produk baru"')
+                self.assertFalse(Master.objects.filter(name='Produk baru').exists())
+        response = self.client.post(
+            reverse('master'),
+            {'kind': 'product', 'name': '  Produk   baru ', 'usage': '2,50000001'},
+        )
+        self.assertRedirects(response, reverse('master') + '?tab=product')
+        product = Master.objects.get(name='Produk baru')
+        usage = MaterialUsage.objects.get(product=product, material__isnull=True)
+        self.assertEqual(usage.usage_yard_per_pcs, Decimal('2.50000001'))
+        self.assertEqual(usage.created_by, self.user)
+
+    def test_product_default_drives_preview_and_production_estimate(self):
+        self.client.force_login(self.user)
+        self.client.post(
+            reverse('master'), {'kind': 'product', 'name': 'Produk default', 'usage': '2,5'}
+        )
+        product = Master.objects.get(name='Produk default')
+        allocation = self.allocation(('40.6', '60.4'))
+        preview = self.client.get(reverse('cmt_detail', args=[self.cmt.pk]))
+        default = next(u for u in preview.context['usage_preview'] if u['product_id'] == product.pk)
+        self.assertIsNone(default['material_id'])
+        self.assertEqual(default['usage_yard_per_pcs'], Decimal('2.5'))
+        self.assertTrue(default['active'])
+        self.assertTrue(
+            preview.context['allocation_preview'][str(allocation.pk)][0]['material_active']
+        )
+        po = tautkan_po(allocation, 'PO DEFAULT', self.user, product=product)
+        unit = ProductionUnit.objects.get(po=po)
+        self.assertIsNone(unit.usage_source.material_id)
+        self.assertEqual(unit.usage_snapshot, Decimal('2.5'))
+        row = po_status(po)['rows'][0]
+        self.assertEqual((row['allocated_yard'], row['estimate']), (Decimal('101'), 40))
+        self.assertContains(self.client.get(reverse('po_detail', args=[po.pk])), '40 pcs')
+
+    def test_product_default_edit_keeps_old_snapshot_and_updates_new_po(self):
+        product = Master.objects.create(kind='product', name='Produk snapshot')
+        save_product_usage(product, '2,5', self.user)
+        po, unit = self.ready(product=product)
+        self.client.force_login(self.user)
+        response = self.client.post(
+            reverse('master'),
+            {'kind': 'product', 'id': product.pk, 'name': 'Produk snapshot baru', 'usage': '2'},
+        )
+        self.assertEqual(response.status_code, 302)
+        unit.refresh_from_db()
+        product.refresh_from_db()
+        self.assertEqual(product.name, 'Produk snapshot baru')
+        self.assertEqual(unit.usage_snapshot, Decimal('2.5'))
+        new_po, new_unit = self.ready(product=product)
+        self.assertEqual(new_unit.usage_snapshot, Decimal('2'))
+        self.assertEqual((po_status(po)['estimate'], po_status(new_po)['estimate']), (40, 50))
+        audit = Log.objects.filter(aksi='ubah pemakaian paten').latest('pk')
+        self.assertIn('"material_id": null', audit.detail)
+        self.assertIn('"before": {', audit.detail)
+
+    def test_invalid_product_edit_and_duplicate_name_are_atomic(self):
+        save_product_usage(self.product, '2.5', self.user)
+        self.client.force_login(self.user)
+        for name, value in [('Nama berubah', '0'), (self.other_product.name, '3')]:
+            with self.subTest(name=name):
+                response = self.client.post(
+                    reverse('master'),
+                    {'kind': 'product', 'id': self.product.pk, 'name': name, 'usage': value},
+                )
+                self.assertEqual(response.status_code, 200)
+                item = next(i for i in response.context['items'] if i.pk == self.product.pk)
+                self.assertTrue(item.edit_form.errors)
+                self.product.refresh_from_db()
+                self.assertEqual(self.product.name, 'Fuji')
+                self.assertEqual(
+                    MaterialUsage.objects.get(
+                        product=self.product, material__isnull=True
+                    ).usage_yard_per_pcs,
+                    Decimal('2.5'),
+                )
+
+    def test_material_specific_standard_retains_priority_and_deactivation(self):
+        save_product_usage(self.product, '3', self.user)
+        po, unit = self.ready()
+        self.assertEqual(unit.usage_snapshot, Decimal('2'))
+        self.assertEqual(po_status(po)['estimate'], 50)
+        self.save_usage(self.product, self.material, '2', active=False, edit=True)
+        with self.assertRaisesMessage(ValidationError, 'belum diisi di Master'):
+            self.ready()
+
+    def test_draft_product_and_legacy_setup_accept_product_default(self):
+        product = Master.objects.create(kind='product', name='Produk pengganti')
+        save_product_usage(product, '4', self.user)
+        po, unit = self.ready()
+        change_draft_product(po, product, self.user)
+        unit.refresh_from_db()
+        self.assertEqual(unit.usage_snapshot, Decimal('4'))
+        self.assertEqual(po_status(po)['estimate'], 25)
+        unit.delete()
+        set_legacy_snapshots(po, product, self.user)
+        self.assertEqual(po_status(po)['estimate'], 25)
+
+    def test_material_form_excludes_default_and_rejects_default_identity(self):
+        default = save_product_usage(self.product, '3', self.user)
+        self.client.force_login(self.user)
+        response = self.client.get(reverse('material_usage'), {'product': self.product.pk})
+        self.assertEqual(len(response.context['formset'].initial), 2)
+        with self.assertRaisesMessage(ValidationError, 'Identitas patokan'):
+            save_material_usages(
+                self.product,
+                [{'id': default.pk, 'material': self.material.pk, 'usage': '4'}],
+                self.user,
+            )
+        default.refresh_from_db()
+        self.assertEqual(default.usage_yard_per_pcs, Decimal('3'))
+
+    def test_default_is_unique_and_restricted_to_purchasing(self):
+        default = save_product_usage(self.product, '2.5', self.user)
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            MaterialUsage.objects.create(
+                product=self.product,
+                usage_yard_per_pcs='3',
+                created_by=self.user,
+                updated_by=self.user,
+            )
+        with self.assertRaises(PermissionDenied):
+            save_product_usage(self.product, '3', self.director)
+        self.client.force_login(self.director)
+        response = self.client.get(reverse('master'), {'tab': 'product'})
+        self.assertContains(response, '2,5')
+        self.assertNotContains(response, 'name="usage"')
+        response = self.client.post(
+            reverse('master'),
+            {'kind': 'product', 'id': self.product.pk, 'name': 'Fuji', 'usage': '3'},
+        )
+        self.assertEqual(response.status_code, 403)
+        default.refresh_from_db()
+        self.assertEqual(default.usage_yard_per_pcs, Decimal('2.5'))
+
+    def test_other_master_tabs_and_product_toggle_do_not_require_usage(self):
+        self.client.force_login(self.user)
+        response = self.client.post(reverse('master'), {'kind': 'material', 'name': 'Bahan baru'})
+        self.assertRedirects(response, reverse('master') + '?tab=material')
+        self.assertNotContains(
+            self.client.get(reverse('master'), {'tab': 'material'}), 'name="usage"'
+        )
+        response = self.client.post(
+            reverse('master'), {'kind': 'product', 'id': self.product.pk, 'action': 'toggle'}
+        )
+        self.assertEqual(response.status_code, 302)
+        self.product.refresh_from_db()
+        self.assertFalse(self.product.active)
+        self.assertEqual(self.product.name, 'Fuji')
 
     def test_server_ignores_spoofed_estimate_status_and_snapshot(self):
         po, unit = self.ready()

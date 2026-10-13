@@ -4,8 +4,8 @@ Implementasi PRD 12 Oktober 2026. Payment tetap memakai alur dan layanan yang su
 
 ## Penggunaan
 
-1. Buat produk di **Master → Produk** dan bahan di **Master → Bahan**.
-2. Buka **Master → Pemakaian Paten Bahan**, pilih produk, lalu isi nilai setiap bahan. Input `2,5` dan `2.5` sama-sama berarti 2,5 yard/pcs. Gunakan **Tambah Bahan** untuk baris tambahan. Nonaktifkan patokan lewat kolom Aktif.
+1. Di **Master → Produk**, isi **Nama produk** dan **Pemakaian Paten (yard/pcs)** dalam satu form. Keduanya wajib diisi; patokan harus lebih dari nol. Input `2,5` dan `2.5` sama-sama berarti 2,5 yard/pcs. Nilai patokan juga dapat diubah langsung di baris produk.
+2. Buat bahan di **Master → Bahan**. Bila suatu bahan memerlukan patokan berbeda, buka **Master → Pemakaian Paten Bahan** dan isi patokan khusus produk/bahan. Patokan khusus yang sudah ada tetap didahulukan; penonaktifannya memblokir bahan tersebut. Bahan tanpa entri khusus otomatis memakai patokan produk.
 3. Setelah seluruh bahan diterima di CMT, pilih produk dari Master ketika menghubungkan pengiriman bahan ke nomor PO. Preview menampilkan patokan dan estimasi per bahan/warna. Backend memvalidasi ulang dan menyimpan snapshot; patokan yang belum tersedia memblokir penyimpanan hubungan produksi tersebut. Invoice dan reservasi bahan ke CMT tetap dapat dibuat.
 4. Di Detail PO, catat hasil aktual per ukuran dan kiriman gudang melalui form yang sudah ada. Bagian **Estimasi dan kelanjutan pengiriman** berada dekat form/riwayat kiriman, dengan yard, snapshot, estimasi, terkirim, dan selisih setiap unit.
 5. Pilih **Masih ada kiriman menyusul** untuk proses terbuka atau **Pengiriman sudah final** untuk menutup unit. Kekurangan saat final memerlukan Keterangan Selisih. Catatan saja tidak menutup proses. Setiap unit harus final sebelum PO selesai.
@@ -15,7 +15,7 @@ PO aktif lama tanpa snapshot menampilkan **Patokan belum ditetapkan**. Purchasin
 ## Data dan perhitungan
 
 - `Master.kind=product` menyediakan identitas produk; `Po.product` menyimpan ID. Teks `Po.produk` serta `pemakaian_std` lama tetap dipertahankan.
-- `MaterialUsage` unik per produk/bahan, menyimpan angka desimal, status aktif, pembuat, dan pengubah terakhir. Perubahan dicatat di `Log` dengan nilai sebelum/sesudah. Tidak ada penghapusan patokan melalui form.
+- `MaterialUsage` unik per produk/bahan, menyimpan angka desimal, status aktif, pembuat, dan pengubah terakhir. Patokan umum produk memakai `material=NULL` dengan constraint unik satu patokan umum per produk. Perubahan dicatat di `Log` dengan nilai sebelum/sesudah. Tidak ada penghapusan patokan melalui form.
 - `ProductionUnit` unik per PO/bahan/warna mengikuti pemisahan produksi yang sudah ada. Snapshot mencatat produk, sumber Master, angka patokan, waktu, dan aturan HALF_UP. Rincian ukuran tetap menjadi bagian hasil produksi aktual, bukan patokan baru per ukuran.
 - Yard adalah jumlah roll yang benar-benar terhubung ke unit tersebut, bukan seluruh invoice. Estimasi dihitung sekali dari total yard memakai Decimal dan pembandingan sisa yang tepat terhadap batas 0,5. Roll menyimpan maksimal 6 angka pecahan; patokan maksimal 8. Input dengan ketelitian berlebih ditolak, bukan dibulatkan diam-diam.
 - Parser yard mempertahankan format lama `1.773` sebagai 1.773 yard. Untuk tiga angka desimal yard gunakan koma, misalnya `100,125`. Input patokan memakai format desimal tanpa pemisah ribuan.
@@ -40,6 +40,7 @@ Jalankan pada setiap database deployment:
 
 - `0010_material_usage_snapshots`: menambah struktur patokan/snapshot/finalisasi, identitas produk, penanda histori, dan ketelitian yard.
 - `0011_preserve_completed_production`: membuat identitas Master Produk dari nama produk historis dan mempertahankan status selesai berdasarkan data lama, termasuk pemeriksaan ukuran. Tidak menebak patokan atau membuat snapshot dari hasil aktual.
+- `0012_product_default_usage`: memungkinkan patokan umum produk diinput bersama nama. Patokan per bahan dan snapshot lama tetap dipertahankan; nilai patokan produk lama tidak ditebak.
 
 Migrasi lokal `severli.sqlite3` sudah diterapkan setelah backup di `.verification/severli-before-patent-20261012-140533.sqlite3`. Jumlah PO, invoice, roll, hasil, kiriman, pembayaran, dan akun sebelum/sesudah sama.
 

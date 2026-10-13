@@ -116,6 +116,21 @@ class UsageField(forms.CharField):
         return parse_usage(super().clean(value))
 
 
+class MasterForm(forms.Form):
+    name = forms.CharField(label='Nama', max_length=160)
+    usage = UsageField(label='Pemakaian Paten (yard/pcs)')
+
+    def __init__(self, *args, kind, **kwargs):
+        super().__init__(*args, **kwargs)
+        if kind == Master.Kind.PRODUCT:
+            self.fields['name'].label = 'Nama produk'
+        else:
+            self.fields.pop('usage')
+
+    def clean_name(self):
+        return ' '.join(self.cleaned_data['name'].split())
+
+
 class MaterialUsageForm(forms.Form):
     id = forms.IntegerField(required=False, widget=forms.HiddenInput)
     material = forms.ModelChoiceField(

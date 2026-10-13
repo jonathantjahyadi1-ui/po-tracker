@@ -1,7 +1,7 @@
 {% extends 'base.html' %}{% load static %}
 {% block content %}
 <script src="{% static 'material-usage.js' %}" defer></script>
-<div class="page-head"><div><a class="back" href="{% url 'master' %}?tab=product">Master Produk</a><h1>Pemakaian Paten Bahan</h1><p>Patokan manual per produk dan bahan. Satuan tetap yard/pcs.</p></div></div>
+<div class="page-head"><div><a class="back" href="{% url 'master' %}?tab=product">Master Produk</a><h1>Pemakaian Paten Bahan</h1><p>Patokan khusus per produk dan bahan. Untuk patokan umum, isi yard/pcs langsung di Master Produk. Patokan khusus menggantikan patokan produk untuk bahan tersebut.</p></div></div>
 {% if usage_error %}<div class="form-error-summary" role="alert">{{ usage_error }}</div>{% endif %}
 <form method="get" class="inline-form panel">
 <div class="field"><label for="usage-product">Produk</label><select id="usage-product" name="product" required><option value="">Pilih produk</option>{% for item in products %}<option value="{{ item.pk }}" {% if product.pk == item.pk %}selected{% endif %}>{{ item.name }}</option>{% endfor %}</select></div><button class="button" type="submit">Tampilkan bahan</button>

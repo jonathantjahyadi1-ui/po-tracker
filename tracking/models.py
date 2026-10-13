@@ -335,7 +335,9 @@ class Log(Dated):
 
 class MaterialUsage(Dated):
     product = models.ForeignKey(Master, on_delete=models.PROTECT, related_name='material_usages')
-    material = models.ForeignKey(Master, on_delete=models.PROTECT, related_name='+')
+    material = models.ForeignKey(
+        Master, on_delete=models.PROTECT, related_name='+', null=True, blank=True
+    )
     usage_yard_per_pcs = models.DecimalField(max_digits=20, decimal_places=8)
     active = models.BooleanField(default=True)
     created_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name='+')
@@ -346,6 +348,11 @@ class MaterialUsage(Dated):
         ordering = ['material__name', 'pk']
         constraints = [
             models.UniqueConstraint(fields=['product', 'material'], name='usage_product_material'),
+            models.UniqueConstraint(
+                fields=['product'],
+                condition=Q(material__isnull=True),
+                name='usage_product_default',
+            ),
             models.CheckConstraint(condition=Q(usage_yard_per_pcs__gt=0), name='usage_positive'),
         ]
 

@@ -60,6 +60,76 @@ def selected_product(value):
     return product
 
 
+def _write_usage(product, material, amount, active, old, user):
+    before = None if old is None else {'usage': str(old.usage_yard_per_pcs), 'active': old.active}
+    if old and old.usage_yard_per_pcs == amount and old.active == active:
+        return old
+    if old is None:
+        try:
+            with transaction.atomic():
+                old = MaterialUsage.objects.create(
+                    product=product,
+                    material=material,
+                    usage_yard_per_pcs=amount,
+                    active=active,
+                    created_by=user,
+                    updated_by=user,
+                )
+        except IntegrityError:
+            raise ValidationError('Patokan sudah ada; muat ulang Master.')
+    else:
+        old.usage_yard_per_pcs, old.active = amount, active
+        old.updated_by, old.updated_at = user, timezone.now()
+        old.save(update_fields=['usage_yard_per_pcs', 'active', 'updated_by', 'updated_at'])
+    log(
+        user,
+        'ubah pemakaian paten',
+        f'Patokan #{old.pk}',
+        json.dumps(
+            {
+                'product_id': product.pk,
+                'material_id': material.pk if material else None,
+                'before': before,
+                'after': {'usage': str(amount), 'active': active},
+            }
+        ),
+    )
+    return old
+
+
+@transaction.atomic
+def save_product_usage(product, value, user):
+    require_purchasing(user)
+    amount = parse_usage(value)
+    if connection.vendor == 'sqlite':
+        Master.objects.filter(pk=product.pk, kind='product').update(active=F('active'))
+    product = Master.objects.select_for_update().get(pk=product.pk, kind='product')
+    old = (
+        MaterialUsage.objects.select_for_update(of=('self',))
+        .filter(product=product, material__isnull=True)
+        .first()
+    )
+    return _write_usage(product, None, amount, True, old, user)
+
+
+def material_usage_source(product, material_id):
+    # An existing material-specific entry keeps its priority, including deactivation.
+    source = (
+        MaterialUsage.objects.select_for_update(of=('self',))
+        .filter(product=product, product__active=True)
+        .filter(Q(material_id=material_id) | Q(material__isnull=True))
+        .order_by(F('material_id').desc(nulls_last=True))
+        .first()
+    )
+    if (
+        source is None
+        or not source.active
+        or not Master.objects.filter(pk=material_id, kind='material', active=True).exists()
+    ):
+        return None
+    return source
+
+
 @transaction.atomic
 def save_material_usages(product, rows, user):
     require_purchasing(user)
@@ -74,7 +144,12 @@ def save_material_usages(product, rows, user):
     product = Master.objects.select_for_update().get(pk=product.pk)
     if not product.active:
         raise ValidationError('Pilih produk aktif dari Master Produk.')
-    existing = {u.pk: u for u in MaterialUsage.objects.select_for_update().filter(product=product)}
+    existing = {
+        u.pk: u
+        for u in MaterialUsage.objects.select_for_update(of=('self',)).filter(
+            product=product, material__isnull=False
+        )
+    }
     seen, parsed = set(), []
     if not isinstance(rows, list) or not rows or len(rows) > 500:
         raise ValidationError('Isi minimal satu bahan, maksimal 500 baris.')
@@ -102,41 +177,7 @@ def save_material_usages(product, rows, user):
             raise ValidationError('Status aktif tidak valid.')
         parsed.append((old, material, parse_usage(row.get('usage')), active))
     for old, material, amount, active in parsed:
-        before = (
-            None if old is None else {'usage': str(old.usage_yard_per_pcs), 'active': old.active}
-        )
-        if old and old.usage_yard_per_pcs == amount and old.active == active:
-            continue
-        if old is None:
-            try:
-                with transaction.atomic():
-                    old = MaterialUsage.objects.create(
-                        product=product,
-                        material=material,
-                        usage_yard_per_pcs=amount,
-                        active=active,
-                        created_by=user,
-                        updated_by=user,
-                    )
-            except IntegrityError:
-                raise ValidationError('Kombinasi produk dan bahan sudah ada; muat ulang Master.')
-        else:
-            old.usage_yard_per_pcs, old.active = amount, active
-            old.updated_by, old.updated_at = user, timezone.now()
-            old.save(update_fields=['usage_yard_per_pcs', 'active', 'updated_by', 'updated_at'])
-        log(
-            user,
-            'ubah pemakaian paten',
-            f'Patokan #{old.pk}',
-            json.dumps(
-                {
-                    'product_id': product.pk,
-                    'material_id': material.pk,
-                    'before': before,
-                    'after': {'usage': str(amount), 'active': active},
-                }
-            ),
-        )
+        _write_usage(product, material, amount, active, old, user)
 
 
 def require_open_unit(po, material, color, *, allow_legacy_metadata=False):
@@ -171,17 +212,7 @@ def take_snapshots(po, product, pairs, user, *, allow_existing_shipments=False):
             raise ValidationError(
                 'Sudah ada pengiriman; dasar yard tidak boleh ditambah melalui alokasi biasa.'
             )
-        source = (
-            MaterialUsage.objects.select_for_update(of=('self',))
-            .filter(
-                product=product,
-                material_id=material_id,
-                active=True,
-                product__active=True,
-                material__active=True,
-            )
-            .first()
-        )
+        source = material_usage_source(product, material_id)
         if source is None:
             raise ValidationError(MISSING_USAGE)
         if old:
@@ -268,11 +299,7 @@ def change_draft_product(po, product, user, cmt=None):
     pairs = set(po_rolls(po).values_list('material_id', 'color_id'))
     sources = {}
     for material_id, color_id in sorted(pairs):
-        source = (
-            MaterialUsage.objects.select_for_update(of=('self',))
-            .filter(product=product, material_id=material_id, active=True, material__active=True)
-            .first()
-        )
+        source = material_usage_source(product, material_id)
         if source is None:
             raise ValidationError(MISSING_USAGE)
         sources[(material_id, color_id)] = source

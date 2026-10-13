@@ -22,7 +22,10 @@ document.addEventListener('DOMContentLoaded', () => {
       let missing = !select.value || !rows.length;
       if (!select.value) preview.textContent = 'Pilih produk untuk melihat pemakaian paten dan estimasi.';
       else for (const row of rows) {
-        const usage = usages.find(u => String(u.product_id) === select.value && u.material_id === row.material_id);
+        const candidates = usages.filter(u => String(u.product_id) === select.value);
+        const source = candidates.find(u => u.material_id === row.material_id) ||
+          candidates.find(u => u.material_id === null);
+        const usage = source && source.active && row.material_active ? source : null;
         const line = document.createElement('p'); line.className = 'field-help';
         line.textContent = row.material__name + ' / ' + row.color__name + ': ' +
           (usage ? 'Pemakaian Paten: ' + String(usage.usage_yard_per_pcs).replace('.', ',') +
@@ -31,7 +34,7 @@ document.addEventListener('DOMContentLoaded', () => {
         preview.append(line); if (!usage) missing = true;
       }
       if (missing && select.value) {
-        const link = document.createElement('a'); link.href = '/master/pemakaian-paten/?product=' + encodeURIComponent(select.value);
+        const link = document.createElement('a'); link.href = '/master/?tab=product';
         link.textContent = 'Isi patokan di Master'; preview.append(link);
       }
       submit.disabled = missing;
