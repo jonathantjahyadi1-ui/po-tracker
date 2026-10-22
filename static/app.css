@@ -429,3 +429,5 @@ dialog[open] { animation:panel-enter var(--motion-panel) ease-out; }
 .estimate-values dd { margin: 0; font-weight: 600; overflow-wrap: anywhere; }
 .delivery-decision-form { margin-top: 16px; }
 @media (max-width: 640px) { .usage-row { grid-template-columns: 1fr; align-items: stretch; } .usage-audit { grid-column: auto; } .estimate-values { grid-template-columns: 1fr 1fr; } }
+
+.shipment-panel{content-visibility:auto;contain-intrinsic-size:auto 650px}

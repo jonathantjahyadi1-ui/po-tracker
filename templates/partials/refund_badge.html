@@ -1,0 +1,1 @@
+{% load tracker %}{% if payment.refund_due %}<span class="status bs-badge">{{ payment.refund_status }}{% if payment.refund_remaining %} · Rp {{ payment.refund_remaining|indo }}{% endif %}</span>{% endif %}

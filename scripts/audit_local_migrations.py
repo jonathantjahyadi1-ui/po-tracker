@@ -22,6 +22,12 @@ TABLES = {
     'shipment_sizes': 'tracking_kirimukuran',
     'attachment': 'tracking_invoiceattachment',
     'log': 'tracking_log',
+    'master': 'tracking_master',
+    'user': 'tracking_user',
+    'payment': 'tracking_invoicepayment',
+    'bs': 'tracking_fabricdefect',
+    'bs_item': 'tracking_fabricdefectitem',
+    'refund': 'tracking_vendorrefund',
 }
 
 
@@ -44,7 +50,15 @@ def snapshot(path):
             columns = [
                 name
                 for name in columns
-                if name not in ('invoice_color_id', 'cmt_id', 'request_id', 'payment_reconciled')
+                if name
+                not in (
+                    'invoice_color_id',
+                    'cmt_id',
+                    'request_id',
+                    'payment_reconciled',
+                    'bs_yard',
+                    'price_per_yard',
+                )
             ]
             if table == 'tracking_alokasi':
                 columns = [name for name in columns if name not in ('tgl_kirim', 'sj_kirim')]
@@ -54,6 +68,9 @@ def snapshot(path):
                 ]
             if table == 'tracking_alokasi' and 'cmt_id' not in columns:
                 columns.append('cmt_id')
+            # SQLite may rebuild a table with a different physical column order.
+            # Compare the same named fields in a stable order, including every old value.
+            columns.sort()
             rows = db.execute(f'SELECT {",".join(columns)} FROM {table} ORDER BY id').fetchall()
             result['digests'][name] = digest(rows)
         for label, table, column in (
@@ -107,6 +124,10 @@ def main():
             'tracking_invoiceattachment',
             'tracking_hasilukuran',
             'tracking_kirimukuran',
+            'tracking_invoicepayment',
+            'tracking_fabricdefect',
+            'tracking_fabricdefectitem',
+            'tracking_vendorrefund',
         }
         missing = sorted(required - available)
         if missing:

@@ -18,11 +18,11 @@
 <div class="table-wrap"><table class="payment-table"><thead><tr><th>Invoice</th><th>Vendor</th><th>Tanggal invoice</th><th class="num">Total tagihan</th><th class="num">Total dibayar</th><th class="num">Sisa tagihan</th><th>Progres</th><th>Status</th><th>Aksi</th></tr></thead><tbody>
 {% for invoice in page_obj %}<tr>
   <td><a class="ref" href="{% url 'payment_detail' invoice.pk %}">{{ invoice.nomor }}</a></td><td>{{ invoice.vendor.name }}</td><td class="nowrap">{{ invoice.tanggal|date:'d M Y' }}</td>
-  <td class="num">Rp {{ invoice.total_rp|indo }}</td>
+  <td class="num">Rp {{ invoice.payment.net_total|indo }}{% if invoice.payment.bs_total %}<small class="cell-note">Awal Rp {{ invoice.total_rp|indo }}<br>BS −Rp {{ invoice.payment.bs_total|indo }}</small>{% endif %}</td>
   <td class="num">{% if invoice.payment.paid != None %}Rp {{ invoice.payment.paid|indo }}{% else %}—{% endif %}</td>
   <td class="num">{% if invoice.payment.remaining != None %}Rp {{ invoice.payment.remaining|indo }}{% else %}—{% endif %}</td>
   <td>{% if invoice.payment.progress != None %}<div class="payment-progress"><progress max="100" value="{{ invoice.payment.progress|unlocalize }}" aria-label="Progres pembayaran {{ invoice.nomor }}"></progress><span>{{ invoice.payment.progress|floatformat:1 }}%</span></div>{% else %}<span class="muted">Belum terverifikasi</span>{% endif %}</td>
-  <td><span class="status payment-{{ invoice.payment.status_key }}">{{ invoice.payment.status }}</span></td>
+  <td><span class="status payment-{{ invoice.payment.status_key }}">{{ invoice.payment.status }}</span>{% include 'partials/refund_badge.html' with payment=invoice.payment %}</td>
   <td><div class="row-actions"><a class="button small" href="{% url 'payment_detail' invoice.pk %}">Lihat Detail</a>{% if can_pay and invoice.payment.status_key == 'unpaid' or can_pay and invoice.payment.status_key == 'dicicil' %}<a class="button small primary" href="{% url 'payment_create' invoice.pk %}">Bayar</a>{% endif %}</div></td>
 </tr>{% empty %}<tr><td class="empty" colspan="9">Tidak ada invoice yang sesuai. Invoice baru akan muncul setelah disimpan Purchasing.</td></tr>{% endfor %}
 </tbody></table></div></section>

@@ -11,20 +11,23 @@
   {{ form.non_field_errors }}
   <div class="field"><label for="{{ form.name.id_for_label }}">{{ form.name.label }}</label>{{ form.name }}{{ form.name.errors }}</div>
   {% if tab == 'product' %}<div class="field"><label for="{{ form.usage.id_for_label }}">{{ form.usage.label }}</label>{{ form.usage }}{{ form.usage.errors }}</div>{% endif %}
+  {% if tab == 'material' %}<div class="field"><label for="{{ form.price_per_yard.id_for_label }}">{{ form.price_per_yard.label }}</label>{{ form.price_per_yard }}{{ form.price_per_yard.errors }}<small>Wajib diisi sebelum mencatat BS. <a href="{% url 'material_usage' %}">Pemakaian Paten Bahan</a></small></div>{% endif %}
   <button class="button primary" type="submit">Tambah {{ tab_label }}</button>
 </form>
 {% endif %}
 <section class="panel {% if request.user.role == 'purchasing' %}section-gap{% endif %}"><div class="table-wrap"><table><thead><tr><th>Nama</th>{% if tab == 'product' %}<th class="num">Pemakaian Paten (yard/pcs)</th>{% endif %}<th>Status</th>
-  {% if request.user.role == 'purchasing' %}<th>Ubah</th>{% endif %}</tr></thead><tbody>
+  {% if tab == 'material' %}<th class="num">Harga per Yard (Rp)</th>{% endif %}{% if request.user.role == 'purchasing' %}<th>Ubah</th>{% endif %}</tr></thead><tbody>
   {% for item in items %}<tr><td>{{ item.name }}</td>
   {% if tab == 'product' %}<td class="num">{% if item.product_usage %}{{ item.product_usage.usage_yard_per_pcs|precise }}{% else %}Belum diisi{% endif %}<small class="cell-note"><a href="{% url 'material_usage' %}?product={{ item.pk }}">Patokan khusus per bahan</a></small></td>{% endif %}
   <td>{% if item.active %}Aktif{% else %}Nonaktif{% endif %}</td>
+  {% if tab == 'material' %}<td class="num">{% if item.price_per_yard %}{{ item.price_per_yard|indo }}{% else %}Belum diisi{% endif %}</td>{% endif %}
   {% if request.user.role == 'purchasing' %}<td><div class="row-actions master-actions">
     <form method="post" class="row-actions" data-submit-form>{% csrf_token %}
       <input type="hidden" name="kind" value="{{ tab }}"><input type="hidden" name="id" value="{{ item.pk }}">
       {{ item.edit_form.non_field_errors }}
       <div class="field"><label for="{{ item.edit_form.name.id_for_label }}">{{ item.edit_form.name.label }}</label>{{ item.edit_form.name }}{{ item.edit_form.name.errors }}</div>
       {% if tab == 'product' %}<div class="field"><label for="{{ item.edit_form.usage.id_for_label }}">{{ item.edit_form.usage.label }}</label>{{ item.edit_form.usage }}{{ item.edit_form.usage.errors }}</div>{% endif %}
+      {% if tab == 'material' %}<div class="field"><label for="{{ item.edit_form.price_per_yard.id_for_label }}">{{ item.edit_form.price_per_yard.label }}</label>{{ item.edit_form.price_per_yard }}{{ item.edit_form.price_per_yard.errors }}</div>{% endif %}
       <button class="button small" type="submit">Simpan perubahan</button>
     </form>
     <form method="post" data-submit-form>{% csrf_token %}
@@ -34,4 +37,5 @@
     </form></div></td>{% endif %}</tr>
   {% empty %}<tr><td colspan="{% if tab == 'product' %}4{% else %}3{% endif %}" class="empty">Belum ada data {{ tab_label }}.</td></tr>{% endfor %}
   </tbody></table></div></section>
+{% if page_obj.has_other_pages %}<nav class="pagination section-gap" aria-label="Halaman master">{% if page_obj.has_previous %}<a class="button small" href="?tab={{ tab }}&amp;page={{ page_obj.previous_page_number }}">Sebelumnya</a>{% endif %}<span>Halaman {{ page_obj.number }} dari {{ page_obj.paginator.num_pages }}</span>{% if page_obj.has_next %}<a class="button small" href="?tab={{ tab }}&amp;page={{ page_obj.next_page_number }}">Berikutnya</a>{% endif %}</nav>{% endif %}
 {% endblock %}

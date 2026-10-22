@@ -84,6 +84,34 @@ class PaymentForm(forms.Form):
         return validate_document(self.cleaned_data['proof'], 'Bukti pembayaran', 5)
 
 
+class DefectForm(forms.Form):
+    date = forms.DateField(
+        label='Tanggal BS',
+        initial=timezone.localdate,
+        widget=forms.DateInput(attrs={'type': 'date'}, format='%Y-%m-%d'),
+    )
+    note = forms.CharField(label='Keterangan BS', max_length=4000, widget=forms.Textarea)
+    request_id = forms.RegexField(regex=r'^[a-zA-Z0-9_-]{16,64}$', widget=forms.HiddenInput)
+
+
+class RefundForm(DefectForm):
+    amount = MoneyField(label='Nominal refund diterima (Rp)')
+    date = forms.DateField(
+        label='Tanggal penerimaan uang',
+        initial=timezone.localdate,
+        widget=forms.DateInput(attrs={'type': 'date'}, format='%Y-%m-%d'),
+    )
+    note = forms.CharField(
+        label='Keterangan / referensi', max_length=4000, required=False, widget=forms.Textarea
+    )
+
+    def clean_amount(self):
+        amount = self.cleaned_data['amount']
+        if amount <= 0:
+            raise forms.ValidationError('Nominal refund wajib lebih besar dari nol.')
+        return amount
+
+
 class PoForm(forms.ModelForm):
     class Meta:
         model = Po
@@ -119,6 +147,7 @@ class UsageField(forms.CharField):
 class MasterForm(forms.Form):
     name = forms.CharField(label='Nama', max_length=160)
     usage = UsageField(label='Pemakaian Paten (yard/pcs)')
+    price_per_yard = MoneyField(label='Harga per Yard (Rp)', required=False)
 
     def __init__(self, *args, kind, **kwargs):
         super().__init__(*args, **kwargs)
@@ -126,6 +155,14 @@ class MasterForm(forms.Form):
             self.fields['name'].label = 'Nama produk'
         else:
             self.fields.pop('usage')
+        if kind != Master.Kind.MATERIAL:
+            self.fields.pop('price_per_yard')
+
+    def clean_price_per_yard(self):
+        price = self.cleaned_data.get('price_per_yard')
+        if price is not None and price <= 0:
+            raise forms.ValidationError('Harga per yard harus lebih besar dari nol.')
+        return price
 
     def clean_name(self):
         return ' '.join(self.cleaned_data['name'].split())

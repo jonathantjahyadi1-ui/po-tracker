@@ -51,10 +51,17 @@ class Master(Dated):
     kind = models.CharField(max_length=12, choices=Kind.choices)
     name = models.CharField(max_length=160)
     active = models.BooleanField(default=True)
+    price_per_yard = models.DecimalField(max_digits=16, decimal_places=2, null=True, blank=True)
 
     class Meta:
         ordering = ['kind', 'name']
-        constraints = [models.UniqueConstraint('kind', Lower('name'), name='master_kind_name_ci')]
+        constraints = [
+            models.UniqueConstraint('kind', Lower('name'), name='master_kind_name_ci'),
+            models.CheckConstraint(
+                condition=Q(price_per_yard__isnull=True) | Q(price_per_yard__gt=0),
+                name='master_price_positive',
+            ),
+        ]
 
     def save(self, *args, **kwargs):
         self.name = normalize_name(self.name)
@@ -232,6 +239,7 @@ class Roll(Dated):
         DITERIMA = 'diterima', 'Diterima'
         TERPAKAI = 'terpakai', 'Terpakai'
         RUSAK = 'rusak', 'Rusak'
+        DIRETUR = 'diretur', 'Diretur ke vendor'
 
     invoice = models.ForeignKey(Invoice, on_delete=models.PROTECT)
     invoice_po = models.ForeignKey(
@@ -247,6 +255,8 @@ class Roll(Dated):
     )
     urut = models.PositiveIntegerField()
     yard = models.DecimalField(max_digits=14, decimal_places=6)
+    # Transactional cache of active BS items; yard remains the original receipt.
+    bs_yard = models.DecimalField(max_digits=14, decimal_places=6, default=0)
     status = models.CharField(max_length=12, choices=Status.choices, default=Status.TERSEDIA)
     alokasi = models.ForeignKey(Alokasi, on_delete=models.PROTECT, null=True, blank=True)
     tgl_kirim = models.DateField(null=True, blank=True)
@@ -257,6 +267,10 @@ class Roll(Dated):
     class Meta:
         constraints = [
             models.CheckConstraint(condition=Q(yard__gt=0), name='roll_yard_positive'),
+            models.CheckConstraint(
+                condition=Q(bs_yard__gte=0) & Q(bs_yard__lte=models.F('yard')),
+                name='roll_bs_within_yard',
+            ),
             models.UniqueConstraint(
                 fields=['invoice', 'material', 'color', 'urut'], name='roll_urut_unique'
             ),
@@ -265,6 +279,89 @@ class Roll(Dated):
             models.Index(fields=['status']),
             models.Index(fields=['invoice', 'material', 'color']),
             models.Index(fields=['alokasi']),
+        ]
+
+    @property
+    def usable_yard(self):
+        return self.yard - self.bs_yard
+
+    @property
+    def bs_label(self):
+        return ('Sebagian BS' if self.usable_yard > 0 else 'BS') if self.bs_yard else ''
+
+
+class FabricDefect(Dated):
+    number = models.CharField(max_length=60, unique=True)
+    date = models.DateField()
+    cmt = models.ForeignKey(Master, on_delete=models.PROTECT, related_name='+')
+    note = models.TextField()
+    recorded_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name='+')
+    request_id = models.CharField(max_length=64, unique=True)
+    fingerprint = models.CharField(max_length=64)
+    cancelled_at = models.DateTimeField(null=True, blank=True)
+    cancelled_by = models.ForeignKey(
+        User, on_delete=models.PROTECT, related_name='+', null=True, blank=True
+    )
+    cancellation_reason = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ['-date', '-pk']
+
+
+class FabricDefectItem(Dated):
+    defect = models.ForeignKey(FabricDefect, on_delete=models.PROTECT, related_name='items')
+    roll = models.ForeignKey(Roll, on_delete=models.PROTECT, related_name='defect_items')
+    invoice = models.ForeignKey(Invoice, on_delete=models.PROTECT, related_name='defect_items')
+    vendor = models.ForeignKey(Master, on_delete=models.PROTECT, related_name='+')
+    po = models.ForeignKey(Po, on_delete=models.PROTECT, null=True, blank=True)
+    yard = models.DecimalField(max_digits=14, decimal_places=6)
+    price = models.DecimalField(max_digits=16, decimal_places=2)
+    amount = models.DecimalField(max_digits=16, decimal_places=2)
+    return_date = models.DateField(null=True, blank=True)
+    returned_at = models.DateTimeField(null=True, blank=True)
+    returned_by = models.ForeignKey(
+        User, on_delete=models.PROTECT, related_name='+', null=True, blank=True
+    )
+    return_note = models.TextField(blank=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['defect', 'roll'], name='defect_roll_unique'),
+            models.CheckConstraint(condition=Q(yard__gt=0), name='defect_yard_positive'),
+            models.CheckConstraint(condition=Q(price__gt=0), name='defect_price_positive'),
+            models.CheckConstraint(condition=Q(amount__gt=0), name='defect_amount_positive'),
+            models.CheckConstraint(
+                condition=(
+                    Q(returned_at__isnull=True, return_date__isnull=True, returned_by__isnull=True)
+                    | Q(
+                        returned_at__isnull=False,
+                        return_date__isnull=False,
+                        returned_by__isnull=False,
+                    )
+                ),
+                name='defect_return_consistent',
+            ),
+        ]
+
+
+class VendorRefund(Dated):
+    invoice = models.ForeignKey(Invoice, on_delete=models.PROTECT, related_name='refunds')
+    amount = models.DecimalField(max_digits=16, decimal_places=2)
+    date = models.DateField()
+    note = models.TextField(blank=True)
+    recorded_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name='+')
+    request_id = models.CharField(max_length=64, unique=True)
+    fingerprint = models.CharField(max_length=64)
+    cancelled_at = models.DateTimeField(null=True, blank=True)
+    cancelled_by = models.ForeignKey(
+        User, on_delete=models.PROTECT, related_name='+', null=True, blank=True
+    )
+    cancellation_reason = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ['date', 'created_at', 'pk']
+        constraints = [
+            models.CheckConstraint(condition=Q(amount__gt=0), name='refund_amount_positive'),
         ]
 
 

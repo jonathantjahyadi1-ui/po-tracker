@@ -1,0 +1,22 @@
+{% extends 'base.html' %}{% load tracker static l10n %}
+{% block content %}
+<script src="{% static 'defects.js' %}" defer></script>
+{{ impacts|json_script:'bs-invoice-impacts' }}
+<div class="page-head"><div><a class="back" href="{% url 'cmt_detail' cmt.pk %}">{{ cmt.name }}</a><h1>Catat BS</h1><p>Pilih roll yang sudah diterima di CMT. Nomor PO boleh belum diisi.</p></div></div>
+<form method="post" data-submit-form id="bs-form">{% csrf_token %}{{ form.request_id }}
+{% if form.errors %}<div class="form-error-summary" role="alert" tabindex="-1" data-error-summary><strong>BS belum tersimpan.</strong>{{ form.non_field_errors }}{{ form.request_id.errors }}{{ form.date.errors }}{{ form.note.errors }}</div>{% endif %}
+<section class="panel form-section"><h2>Asal bahan</h2><p>CMT: <strong>{{ cmt.name }}</strong>. Harga diambil dari Master Bahan saat disimpan.</p>
+<div class="table-wrap wide-table-wrap"><table><thead><tr><th>Pilih</th><th>Roll / bahan / warna</th><th>Vendor / invoice / PO</th><th class="num">Layak pakai (yard)</th><th class="num">Harga / yard (Rp)</th><th>Yard BS</th><th class="num">Nilai BS (Rp)</th></tr></thead><tbody>
+{% for roll in rolls %}<tr data-bs-row data-invoice="{{ roll.invoice_id }}" data-price="{{ roll.material.price_per_yard|unlocalize }}" data-available="{{ roll.usable_yard|unlocalize }}">
+<td><input type="checkbox" name="roll" value="{{ roll.pk }}" {% if roll.selected_bs %}checked{% endif %} data-bs-select aria-label="Pilih roll {{ roll.urut }} {{ roll.material.name }} {{ roll.color.name }}"></td>
+<td><strong>#{{ roll.urut }} · {{ roll.material.name }}</strong><small class="cell-note">{{ roll.color.name }} · ID {{ roll.pk }}</small>{% include 'partials/bs_roll.html' %}</td>
+<td>{{ roll.invoice.vendor.name }}<small class="cell-note"><a href="{% url 'payment_detail' roll.invoice_id %}">{{ roll.invoice.nomor }}</a> · {{ roll.alokasi.po.nomor|default:'PO belum diisi' }}</small></td>
+<td class="num">{{ roll.usable_yard|precise }}</td><td class="num">{% if roll.material.price_per_yard %}{{ roll.material.price_per_yard|indo }}{% else %}<a href="{% url 'master' %}?tab=material">Isi harga di Master</a>{% endif %}</td>
+<td><label class="sr-only" for="bs-yard-{{ roll.pk }}">Yard BS roll {{ roll.urut }}</label><input id="bs-yard-{{ roll.pk }}" name="yard-{{ roll.pk }}" value="{{ roll.input_bs }}" inputmode="decimal" data-bs-yard placeholder="Contoh: 12,5" autocomplete="off"><button type="button" class="button small" data-bs-all>Seluruh sisa roll</button></td><td class="num" data-bs-value>—</td></tr>
+{% empty %}<tr><td colspan="7" class="empty">Tidak ada roll layak pakai yang sudah diterima di CMT ini.</td></tr>{% endfor %}
+</tbody></table></div></section>
+{% if page_obj.has_other_pages %}<nav class="pagination" aria-label="Halaman pilihan roll BS">{% if page_obj.has_previous %}<a class="button small" href="?page={{ page_obj.previous_page_number }}">Sebelumnya</a>{% endif %}<span>Halaman {{ page_obj.number }} dari {{ page_obj.paginator.num_pages }}. Simpan pilihan halaman ini sebelum berpindah.</span>{% if page_obj.has_next %}<a class="button small" href="?page={{ page_obj.next_page_number }}">Berikutnya</a>{% endif %}</nav>{% endif %}
+<section class="panel form-section section-gap"><h2>Rincian BS</h2><div class="field-grid"><div class="field"><label for="{{ form.date.id_for_label }}">{{ form.date.label }}</label>{{ form.date }}</div><div class="field"><label for="{{ form.note.id_for_label }}">{{ form.note.label }}</label>{{ form.note }}</div></div></section>
+<section class="panel form-section section-gap"><h2>Dampak invoice</h2><div id="bs-impact" aria-live="polite"><p>Pilih roll dan isi yard BS untuk melihat potongan sisa tagihan serta kebutuhan refund.</p></div><p class="field-help">Perhitungan akhir divalidasi kembali saat disimpan. Retur fisik dan uang refund diterima dicatat terpisah pada invoice asal.</p><div class="form-actions"><a class="button" href="{% url 'cmt_detail' cmt.pk %}">Kembali</a><button class="button primary" type="submit">Simpan BS</button></div></section>
+</form>
+{% endblock %}

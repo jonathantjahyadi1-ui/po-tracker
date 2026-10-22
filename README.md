@@ -79,6 +79,13 @@ sendiri dari penyelesaian PO. Invoice lama ditandai **Perlu rekonsiliasi** sampa
 posisi pembayaran dapat diverifikasi. Detail migrasi `0009`, backup lokal, serta
 hasil dan batas verifikasi tersedia di [Payment Invoice](docs/PAYMENT_INVOICE.md).
 
+Fitur **BS di CMT dan Refund Vendor** mengikuti PRD v1.1. Purchasing mengisi
+**Master → Bahan → Harga per Yard (Rp)** sebelum mencatat BS. BS mengurangi yard
+layak pakai dan tagihan invoice asal; kelebihan pembayaran menjadi kebutuhan
+refund pada invoice yang sama. Direktur/Super Admin mencatat uang yang diterima
+secara terpisah. Panduan, migrasi `0013`, hasil uji, peningkatan performa navigasi,
+dan batas verifikasi tersedia di [BS dan Refund Vendor](docs/BS_REFUND_VENDOR.md).
+
 Detail U-01 sampai U-09 dari PRD diterapkan sebagai **default implementasi yang
 masih berupa usulan**, bukan keputusan yang sudah disetujui pengguna. Pilihan,
 kompatibilitas data lama, dan hasil verifikasi dijelaskan di

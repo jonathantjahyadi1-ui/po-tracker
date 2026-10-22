@@ -2,11 +2,14 @@ import json
 
 from django.core.management.base import BaseCommand
 from django.db import transaction
-from django.db.models import Count, Sum
+from django.db.models import Count, DecimalField, F, OuterRef, Subquery, Sum, Value
+from django.db.models.functions import Coalesce
 
 from tracking.models import (
     Alokasi,
     AlokasiRoll,
+    FabricDefect,
+    FabricDefectItem,
     Hasil,
     Invoice,
     InvoiceAttachment,
@@ -17,6 +20,7 @@ from tracking.models import (
     Log,
     Po,
     Roll,
+    VendorRefund,
 )
 from tracking.services import po_status_many
 
@@ -44,6 +48,9 @@ class Command(BaseCommand):
                 InvoiceColor,
                 InvoiceWrite,
                 AlokasiRoll,
+                FabricDefect,
+                FabricDefectItem,
+                VendorRefund,
             )
         }
         totals = {
@@ -71,8 +78,39 @@ class Command(BaseCommand):
                 }
             )
         statuses = po_status_many(Po.objects.all())
+        source_bs = (
+            FabricDefectItem.objects.filter(
+                roll_id=OuterRef('pk'), defect__cancelled_at__isnull=True
+            )
+            .order_by()
+            .values('roll_id')
+            .annotate(total=Sum('yard'))
+        )
+        stock_mismatches = Roll.objects.annotate(
+            source_bs=Coalesce(
+                Subquery(source_bs.values('total')[:1]),
+                Value(0),
+                output_field=DecimalField(max_digits=14, decimal_places=6),
+            )
+        ).exclude(bs_yard=F('source_bs'))
+        from tracking.payment_services import payment_queryset
+
+        refund_mismatches = (
+            payment_queryset(
+                {
+                    'q': '',
+                    'status': '',
+                    'date_from': None,
+                    'date_to': None,
+                }
+            )
+            .filter(_refund_received__gt=0)
+            .filter(_refund_received__gt=F('_paid') - F('_net_total'))
+        )
         report = {
             'counts': counts,
+            'bs_stock_mismatches': list(stock_mismatches.values_list('pk', flat=True)),
+            'refund_exceeds_entitlement': list(refund_mismatches.values_list('pk', flat=True)),
             'totals': totals,
             'unmapped_pos': unmapped,
             'rolls_without_material_row': Roll.objects.filter(invoice_color=None).count(),

@@ -110,6 +110,8 @@ def payment_list(request):
 @payment_access
 @require_GET
 def payment_detail(request, pk):
+    from .defect_views import invoice_defect_context
+
     invoice = get_object_or_404(Invoice.objects.select_related('vendor', 'dibuat_oleh'), pk=pk)
     payments = list(invoice.payments.select_related('recorded_by').defer('proof_content'))
     summary = payment_summary(invoice, payments)
@@ -123,6 +125,7 @@ def payment_detail(request, pk):
             'invoice': invoice,
             'summary': summary,
             'payments': payments,
+            **invoice_defect_context(invoice, request.user, summary),
             'attachment': attachment,
             'can_pay': can_pay(request.user)
             and not invoice.dibatalkan
@@ -233,6 +236,8 @@ def style_sheet(sheet, money_columns, date_columns):
 @payment_access
 @require_GET
 def payment_export(request):
+    from .defect_exports import add_adjustment_sheets, load_adjustments
+
     try:
         filters = read_filters(request)
     except ValidationError as exc:
@@ -258,6 +263,7 @@ def payment_export(request):
         grouped = defaultdict(list)
         for payment in payments:
             grouped[payment.invoice_id].append(payment)
+        load_adjustments(invoices)
         for invoice in invoices:
             invoice.payment = payment_summary(invoice, grouped[invoice.pk])
     workbook = Workbook()
@@ -348,6 +354,7 @@ def payment_export(request):
     style_sheet(history, (8,), (5,))
     for row in history.iter_rows(min_row=6):
         row[5].number_format = 'dd/mm/yyyy hh:mm:ss'
+    add_adjustment_sheets(workbook, invoices)
     output = BytesIO()
     workbook.save(output)
     workbook.close()

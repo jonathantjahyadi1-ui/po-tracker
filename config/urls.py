@@ -1,6 +1,6 @@
 from django.urls import path
 
-from tracking import payment_views, views
+from tracking import defect_views, payment_views, views
 
 urlpatterns = [
     path('healthz/', views.health, name='health'),
@@ -23,6 +23,12 @@ urlpatterns = [
     path('alokasi/<int:pk>/', views.allocation_detail, name='allocation_detail'),
     path('cmt/', views.cmt_list, name='cmt_list'),
     path('cmt/<int:pk>/', views.cmt_detail, name='cmt_detail'),
+    path('cmt/<int:pk>/bs/baru/', defect_views.defect_create, name='defect_create'),
+    path('bs/<int:pk>/', defect_views.defect_detail, name='defect_detail'),
+    path('bs/<int:pk>/batalkan/', defect_views.defect_cancel, name='defect_cancel'),
+    path('bs/item/<int:pk>/retur/', defect_views.defect_return, name='defect_return'),
+    path('payment/<int:pk>/refund/', defect_views.refund_create, name='refund_create'),
+    path('payment/refund/<int:pk>/batalkan/', defect_views.refund_cancel, name='refund_cancel'),
     path('po/', views.po_list, name='po_list'),
     path('po/cmt/<int:pk>/', views.po_cmt_list, name='po_cmt_list'),
     path('po/historis/', views.po_legacy_list, name='po_legacy_list'),

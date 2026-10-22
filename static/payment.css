@@ -33,3 +33,5 @@
   .payment-form .field-grid { grid-template-columns:1fr; }
   .payment-preview { flex-direction:column; }
 }
+
+.bs-badge{background:#fce9e7;color:#a12e25;white-space:normal}.cell-note .bs-badge{display:inline-block}#bs-form input[data-bs-yard]{min-width:9rem}#bs-form [data-bs-all]{margin-top:.4rem}#bs td:first-child{overflow-wrap:anywhere;max-width:22rem}@media print{.sidebar,.topbar,.row-actions,form,details{display:none!important}.workspace{margin:0!important}.table-wrap{overflow:visible!important}.panel{break-inside:auto}}

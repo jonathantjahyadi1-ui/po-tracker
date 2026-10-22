@@ -265,7 +265,7 @@ def set_legacy_snapshots(po, product, user):
         yard = (
             po_rolls(po)
             .filter(material_id=material_id, color_id=color_id)
-            .aggregate(total=Sum('yard'))['total']
+            .aggregate(total=Sum(F('yard') - F('bs_yard')))['total']
         )
         if yard is None or yard <= 0:
             raise ValidationError('Total yard alokasi harus lebih dari 0.')
@@ -357,7 +357,7 @@ def save_delivery_decision(po, unit_id, continuation, note, user):
     yard = (
         po_rolls(po)
         .filter(material_id=unit.material_id, color_id=unit.color_id)
-        .aggregate(total=Sum('yard'))['total']
+        .aggregate(total=Sum(F('yard') - F('bs_yard')))['total']
     )
     if yard is None or yard <= 0:
         raise ValidationError('Total yard alokasi harus lebih dari 0.')
@@ -415,7 +415,7 @@ def apply_production_status(summaries, ids):
             Q(alokasi__po_id__in=ids) | Q(alokasi__isnull=True, invoice_po__po_id__in=ids)
         )
         .values('alokasi__po_id', 'invoice_po__po_id', 'material_id', 'color_id')
-        .annotate(total=Sum('yard'))
+        .annotate(total=Sum(F('yard') - F('bs_yard')))
     ):
         key = (
             item['alokasi__po_id'] or item['invoice_po__po_id'],

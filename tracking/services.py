@@ -104,6 +104,10 @@ def yard_total(queryset):
     return queryset.aggregate(value=Sum('yard'))['value'] or ZERO
 
 
+def usable_yard_total(queryset):
+    return queryset.aggregate(value=Sum(F('yard') - F('bs_yard')))['value'] or ZERO
+
+
 def po_rolls(po):
     """Include unallocated invoice-only historical PO links without duplicating rolls."""
     return Roll.objects.filter(Q(alokasi__po=po) | Q(alokasi__isnull=True, invoice_po__po=po))
@@ -146,7 +150,7 @@ def require_mapped_production(po, color):
 
 def yard_po(po, warna, material=None):
     material = production_material(po, warna, material)
-    return yard_total(
+    return usable_yard_total(
         po_rolls(po).filter(
             material=material, color=warna, status__in=['dikirim', 'diterima', 'terpakai']
         )
@@ -281,9 +285,14 @@ def po_status_many(pos):
     if not ids:
         return {}
     pair_ids = {po_id: set() for po_id in ids}
-    rolls = Roll.objects.filter(
-        Q(alokasi__po_id__in=ids) | Q(alokasi__isnull=True, invoice_po__po_id__in=ids)
-    ).values_list('alokasi__po_id', 'invoice_po__po_id', 'material_id', 'color_id')
+    rolls = (
+        Roll.objects.filter(
+            Q(alokasi__po_id__in=ids) | Q(alokasi__isnull=True, invoice_po__po_id__in=ids)
+        )
+        .filter(yard__gt=F('bs_yard'))
+        .values_list('alokasi__po_id', 'invoice_po__po_id', 'material_id', 'color_id')
+        .distinct()
+    )
     for allocation_po, legacy_po, material_id, color_id in rolls:
         pair_ids[allocation_po or legacy_po].add((material_id, color_id))
     results = {po_id: {} for po_id in ids}
@@ -487,6 +496,8 @@ def ajukan_alokasi(roll_ids, cmt, user):
             raise ValidationError(f'Roll #{roll.urut} baru saja dialokasikan. Muat ulang halaman.')
         if roll.invoice.dibatalkan:
             raise ValidationError('Invoice yang dibatalkan tidak dapat dialokasikan.')
+        if roll.usable_yard <= ZERO:
+            raise ValidationError(f'Roll #{roll.urut} tidak memiliki yard layak pakai.')
     alokasi = Alokasi.objects.create(cmt=cmt, dibuat_oleh=user)
     AlokasiRoll.objects.bulk_create([AlokasiRoll(alokasi=alokasi, roll=roll) for roll in locked])
     pindah_status(ids, 'menunggu', user, alokasi=alokasi)
@@ -609,12 +620,15 @@ def tautkan_po(alokasi, nomor_po, user, produk='', product=None):
     if (
         alokasi.status != 'disetujui'
         or not rolls
-        or any(roll.status != 'diterima' for roll in rolls)
+        or any(roll.status not in ('diterima', 'diretur') for roll in rolls)
     ):
         raise ValidationError('Nomor PO baru dapat diisi setelah seluruh roll pengiriman Diterima.')
     if not alokasi.cmt.active or alokasi.cmt.kind != 'cmt':
         raise ValidationError('CMT tujuan sudah nonaktif atau tidak valid.')
     product = selected_product(product)
+    pairs = {(r.material_id, r.color_id) for r in rolls if r.usable_yard > ZERO}
+    if not pairs:
+        raise ValidationError('Seluruh sisa roll BS; tidak ada bahan layak pakai untuk PO.')
     po, created = Po.objects.get_or_create(
         nomor=nomor, defaults={'cmt': alokasi.cmt, 'produk': product.name, 'product': product}
     )
@@ -628,7 +642,7 @@ def tautkan_po(alokasi, nomor_po, user, produk='', product=None):
         raise ValidationError(f'{po.nomor} sudah dimiliki CMT lain.')
     alokasi.po = po
     alokasi.save(update_fields=['po'])
-    take_snapshots(po, product, {(roll.material_id, roll.color_id) for roll in rolls}, user)
+    take_snapshots(po, product, pairs, user)
     log(
         user,
         'isi PO' if created else 'tautkan PO',
@@ -778,6 +792,16 @@ def simpan_invoice(data, groups, user, invoice=None):
             )
         if invoice.vendor_id != vendor.pk or invoice.nomor != nomor:
             raise ValidationError('Vendor dan nomor invoice terkunci setelah pembayaran.')
+    if invoice and invoice.defect_items.exists():
+        if (
+            total != invoice.total_rp
+            or vendor.pk != invoice.vendor_id
+            or nomor != invoice.nomor
+            or data['tanggal'] != invoice.tanggal
+        ):
+            raise ValidationError(
+                'Nilai dan identitas invoice terkunci karena memiliki histori BS.'
+            )
     if 'surat_jalan' in data:
         invoice_delivery_note = limited_text(data['surat_jalan'], 'Surat jalan invoice', 80)
     if (
@@ -905,6 +929,8 @@ def batalkan_invoice(invoice, user):
     invoice = lock_invoice(invoice.pk)
     if invoice.payments.exists():
         raise ValidationError('Invoice dengan pembayaran tidak dapat dibatalkan.')
+    if invoice.defect_items.exists() or invoice.refunds.exists():
+        raise ValidationError('Invoice dengan histori BS/refund tidak dapat dibatalkan.')
     rolls = list(
         Roll.objects.select_for_update(of=('self',)).filter(invoice=invoice).order_by('pk')
     )
@@ -955,7 +981,7 @@ def ubah_roll_invoice(invoice, submitted, user):
         )
         if not differs:
             continue
-        if roll.status != 'tersedia' or roll.alokasi_id:
+        if roll.status != 'tersedia' or roll.alokasi_id or roll.defect_items.exists():
             raise ValidationError(f'Roll {roll.urut} sudah dialokasikan dan terkunci.')
         material = master('material', material_name)
         color = master('color', color_name)

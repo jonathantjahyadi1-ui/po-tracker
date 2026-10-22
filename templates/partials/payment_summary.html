@@ -3,12 +3,15 @@
 <div class="help-callout" role="status">Posisi pembayaran invoice lama belum terverifikasi. Total dibayar, sisa, dan progres belum dapat dipastikan. Invoice ini memerlukan rekonsiliasi sebelum pembayaran dapat dicatat.</div>
 {% endif %}
 <dl class="payment-totals">
-  <div><dt>Total tagihan</dt><dd>Rp {{ invoice.total_rp|indo }}</dd></div>
+  <div><dt>{% if summary.bs_total %}Nilai invoice sebelum BS{% else %}Total tagihan{% endif %}</dt><dd>Rp {{ invoice.total_rp|indo }}</dd></div>
+  {% if summary.bs_total %}<div><dt>Nilai BS</dt><dd>−Rp {{ summary.bs_total|indo }}</dd></div><div><dt>Tagihan setelah BS</dt><dd>Rp {{ summary.net_total|indo }}</dd></div>{% endif %}
   <div><dt>Total dibayar</dt><dd>{% if summary.paid != None %}Rp {{ summary.paid|indo }}{% else %}Belum terverifikasi{% endif %}</dd></div>
   <div><dt>Sisa tagihan</dt><dd>{% if summary.remaining != None %}Rp {{ summary.remaining|indo }}{% else %}Belum terverifikasi{% endif %}</dd></div>
 </dl>
+{% if summary.refund_due %}<dl class="payment-totals"><div><dt>Refund yang perlu diminta</dt><dd>Rp {{ summary.refund_due|indo }}</dd></div><div><dt>Refund sudah diterima</dt><dd>Rp {{ summary.refund_received|indo }}</dd></div><div><dt>Refund masih perlu diterima</dt><dd>Rp {{ summary.refund_remaining|indo }}</dd></div></dl>{% endif %}
 <div class="payment-position">
   <span class="status payment-{{ summary.status_key }}">{{ summary.status }}</span>
+  {% include 'partials/refund_badge.html' with payment=summary %}
   {% if summary.progress != None %}<div class="payment-progress">
     <progress max="100" value="{{ summary.progress|unlocalize }}" aria-label="Progres pembayaran {{ invoice.nomor }}"></progress>
     <span>{{ summary.progress|floatformat:1 }}%</span>

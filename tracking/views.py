@@ -36,6 +36,8 @@ from .forms import (
 )
 from .models import (
     Alokasi,
+    AlokasiRoll,
+    FabricDefect,
     Invoice,
     InvoiceAttachment,
     KirimGudang,
@@ -67,12 +69,10 @@ from .services import (
     po_status,
     po_status_many,
     putuskan_alokasi,
-    roll_count,
     simpan_invoice,
     tautkan_po,
     terima_alokasi,
     ubah_produk_po,
-    yard_total,
 )
 from .size_services import production_size_data, rekonsiliasi_ukuran, simpan_ukuran
 
@@ -247,6 +247,7 @@ def master_page(request):
                         if editing_id
                         else Master(kind=kind)
                     )
+                    old_price = item.price_per_yard
                     if toggling:
                         if not editing_id:
                             raise ValidationError('Pilih master yang akan diubah statusnya.')
@@ -260,10 +261,19 @@ def master_page(request):
                         ):
                             raise ValidationError('Nama sudah ada dalam daftar ini.')
                         item.name = name
+                        if kind == Master.Kind.MATERIAL:
+                            item.price_per_yard = bound_form.cleaned_data['price_per_yard']
                     item.save()
                     if kind == Master.Kind.PRODUCT and not toggling:
                         save_product_usage(item, bound_form.cleaned_data['usage'], request.user)
-                    log(request.user, 'ubah master', f'{item.get_kind_display()} {item.name}')
+                    log(
+                        request.user,
+                        'ubah master',
+                        f'{item.get_kind_display()} {item.name}',
+                        f'Harga per yard: {old_price} -> {item.price_per_yard}'
+                        if kind == Master.Kind.MATERIAL and not toggling
+                        else '',
+                    )
                     messages.success(request, 'Master tersimpan.')
                 return redirect(f'/master/?tab={kind}')
             except ValidationError as error:
@@ -272,15 +282,17 @@ def master_page(request):
                 bound_form.add_error('name', 'Nama sudah ada dalam daftar ini.')
             except OperationalError:
                 bound_form.add_error(None, 'Data sedang diperbarui. Coba simpan kembali.')
-    items = list(
+    page_obj = Paginator(
         Master.objects.filter(kind=tab).prefetch_related(
             Prefetch(
                 'material_usages',
                 queryset=MaterialUsage.objects.filter(material__isnull=True),
                 to_attr='product_usages',
             )
-        )
-    )
+        ),
+        50,
+    ).get_page(request.GET.get('page'))
+    items = list(page_obj.object_list)
     for item in items:
         item.product_usage = item.product_usages[0] if item.product_usages else None
         item.edit_form = (
@@ -290,6 +302,7 @@ def master_page(request):
                 kind=tab,
                 initial={
                     'name': item.name,
+                    'price_per_yard': item.price_per_yard,
                     'usage': (
                         format(item.product_usage.usage_yard_per_pcs, 'f')
                         if item.product_usage
@@ -309,6 +322,7 @@ def master_page(request):
             'tab_label': Master.Kind(tab).label,
             'kinds': Master.Kind.choices,
             'items': items,
+            'page_obj': page_obj,
             'form': (
                 bound_form
                 if bound_form is not None and not editing_id
@@ -431,58 +445,29 @@ def vendor_list(request):
 
 @access('purchasing', 'direktur')
 def vendor_detail(request, pk):
+    from .payment_services import payment_queryset, payment_summary
+
     vendor = get_object_or_404(Master, pk=pk, kind='vendor')
     q = request.GET.get('q', '').strip()
-    queryset = Invoice.objects.filter(vendor=vendor, dibatalkan=False)
+    queryset = (
+        payment_queryset(
+            {
+                'q': '',
+                'status': '',
+                'date_from': None,
+                'date_to': None,
+            }
+        )
+        .filter(vendor=vendor)
+        .annotate(roll_count=Count('roll'), yards=Sum('roll__yard'))
+    )
     if q:
         queryset = queryset.filter(nomor__icontains=q)
-    page_obj = Paginator(
-        queryset.order_by('-tanggal', '-id').prefetch_related(
-            Prefetch(
-                'roll_set',
-                queryset=Roll.objects.select_related('material', 'color', 'alokasi__cmt'),
-            )
-        ),
-        20,
-    ).get_page(request.GET.get('page'))
+    page_obj = Paginator(queryset, 20).get_page(request.GET.get('page'))
     invoices = list(page_obj.object_list)
-    grouped_yards = {
-        (row['invoice_id'], row['material_id'], row['color_id']): row['yard']
-        for row in Roll.objects.filter(invoice_id__in=[item.pk for item in invoices])
-        .values('invoice_id', 'material_id', 'color_id')
-        .annotate(yard=Sum('yard'))
-    }
     for invoice in invoices:
-        groups = {}
-        for roll in invoice.roll_set.all():
-            key = (roll.material_id, roll.color_id)
-            row = groups.setdefault(
-                key,
-                {
-                    'material': roll.material,
-                    'color': roll.color,
-                    'rolls': 0,
-                    'yard': 0,
-                    'available': 0,
-                    'pending': defaultdict(int),
-                    'sent': defaultdict(lambda: defaultdict(int)),
-                },
-            )
-            row['rolls'] += 1
-            if roll.status == 'tersedia':
-                row['available'] += 1
-            elif roll.status in ('menunggu', 'siap_kirim') and roll.alokasi_id:
-                row['pending'][roll.alokasi.cmt.name] += 1
-            elif roll.tgl_kirim and roll.alokasi_id:
-                row['sent'][roll.tgl_kirim][roll.alokasi.cmt.name] += 1
-        invoice.rows = list(groups.values())
-        for row in invoice.rows:
-            row['yard'] = grouped_yards[(invoice.pk, row['material'].pk, row['color'].pk)]
-            row['pending'] = dict(row['pending'])
-            row['sent'] = {date: dict(counts) for date, counts in row['sent'].items()}
-        invoice.dates = sorted({date for row in invoice.rows for date in row['sent']})
-        invoice.yards = sum((row['yard'] for row in invoice.rows), 0)
-        invoice.roll_count = sum(row['rolls'] for row in invoice.rows)
+        invoice.yards = invoice.yards or 0
+        invoice.payment = payment_summary(invoice)
     return render(
         request,
         'vendor_detail.html',
@@ -818,6 +803,9 @@ def invoice_edit(request, pk=None):
 
 @access('purchasing', 'direktur')
 def invoice_detail(request, pk):
+    from .defect_services import set_bs_return_details
+    from .defect_views import invoice_defect_context
+
     invoice = get_object_or_404(Invoice.objects.select_related('vendor'), pk=pk)
     rolls = list(
         invoice.roll_set.select_related(
@@ -825,6 +813,7 @@ def invoice_detail(request, pk):
         ).order_by('invoice_po__urut', 'material__name', 'color__name', 'urut')
     )
     attachment = InvoiceAttachment.objects.filter(invoice=invoice).defer('content').first()
+    set_bs_return_details(rolls)
     return render(
         request,
         'invoice_detail.html',
@@ -832,12 +821,13 @@ def invoice_detail(request, pk):
             'title': invoice.nomor,
             'active': 'vendor',
             'invoice': invoice,
+            **invoice_defect_context(invoice, request.user),
             'attachment': attachment,
             'payment_locked': invoice.payments.exists(),
             'material_count': len({roll.material_id for roll in rolls}),
             'rolls': rolls,
-            'roll_count': roll_count(invoice.roll_set.all()),
-            'yard_total': yard_total(invoice.roll_set.all()),
+            'roll_count': len(rolls),
+            'yard_total': sum((r.yard for r in rolls), 0),
             'cmts': Master.objects.filter(kind='cmt', active=True),
             'back': safe_back(request, f'/vendor/{invoice.vendor_id}/'),
             'back_url': safe_back(request, f'/vendor/{invoice.vendor_id}/'),
@@ -1028,6 +1018,8 @@ def cmt_list(request):
 
 @access('purchasing', 'direktur')
 def cmt_detail(request, pk):
+    from .defect_services import set_bs_return_details
+
     cmt = get_object_or_404(Master, pk=pk, kind='cmt')
     cmt_error = None
     posted = request.POST if request.method == 'POST' else {}
@@ -1089,7 +1081,12 @@ def cmt_detail(request, pk):
         Alokasi.objects.filter(cmt=cmt)
         .select_related('po')
         .prefetch_related(
-            'items__roll__invoice__vendor', 'items__roll__material', 'items__roll__color'
+            Prefetch(
+                'items',
+                queryset=AlokasiRoll.objects.select_related(
+                    'roll__invoice__vendor', 'roll__material', 'roll__color'
+                ),
+            )
         )
         .order_by('-id')
     )
@@ -1108,7 +1105,8 @@ def cmt_detail(request, pk):
         allocation.roll_count = len(allocation.roll_list)
         allocation.yard_total = sum((roll.yard for roll in allocation.roll_list), 0)
         allocation.received_count = sum(
-            roll.status in ('diterima', 'terpakai', 'rusak') for roll in allocation.roll_list
+            roll.status in ('diterima', 'terpakai', 'rusak', 'diretur')
+            for roll in allocation.roll_list
         )
         allocation.shipped_count = sum(roll.status == 'dikirim' for roll in allocation.roll_list)
         allocation_display(allocation, allocation.roll_list)
@@ -1139,7 +1137,8 @@ def cmt_detail(request, pk):
             allocation.status == 'disetujui'
             and not allocation.po_id
             and bool(allocation.roll_list)
-            and all(roll.status == 'diterima' for roll in allocation.roll_list)
+            and all(roll.status in ('diterima', 'diretur') for roll in allocation.roll_list)
+            and any(roll.usable_yard > 0 for roll in allocation.roll_list)
         )
         preview_rows = {}
         for roll in allocation.roll_list:
@@ -1153,7 +1152,7 @@ def cmt_detail(request, pk):
                     'color__name': roll.color.name,
                     'yard': 0,
                 }
-            preview_rows[key]['yard'] += roll.yard
+            preview_rows[key]['yard'] += roll.usable_yard
         allocation.estimate_preview = list(preview_rows.values())
         allocation.material_labels = ', '.join(
             dict.fromkeys(
@@ -1166,7 +1165,8 @@ def cmt_detail(request, pk):
         allocation.vendor_labels = ', '.join(
             dict.fromkeys(roll.invoice.vendor.name for roll in allocation.roll_list)
         )
-    pos = balance_flags(list(Po.objects.filter(cmt=cmt).order_by('-id')))
+    set_bs_return_details([roll for allocation in allocations for roll in allocation.roll_list])
+    pos = balance_flags(list(Po.objects.filter(cmt=cmt).order_by('-id')[:20]))
     return render(
         request,
         'cmt_detail.html',
@@ -1175,6 +1175,9 @@ def cmt_detail(request, pk):
             'active': 'cmt',
             'cmt': cmt,
             'allocations': allocations,
+            'bs_records': Paginator(
+                FabricDefect.objects.filter(cmt=cmt).select_related('recorded_by'), 20
+            ).get_page(request.GET.get('bs_page')),
             'pos': pos,
             'today': timezone.localdate(),
             'cmt_error': cmt_error,
@@ -1228,16 +1231,25 @@ def render_po_list(request, cmt=None, legacy=False):
     queryset = Po.objects.filter(cmt=cmt).select_related('cmt').order_by('-id')
     if q:
         queryset = queryset.filter(Q(nomor__icontains=q) | Q(produk__icontains=q))
-    pos = balance_flags(list(queryset))
     # Old list filters retain meaning when following bookmarked URLs.
     filter_value = {'selesai': 'done', 'balance': 'done', 'belum': 'kurang_kirim'}.get(
         filter_value, filter_value
     )
+    if not filter_value:
+        page_obj = Paginator(queryset, 30).get_page(request.GET.get('page'))
+        pos = balance_flags(list(page_obj.object_list))
+        page_obj.object_list = pos
+        po_count = page_obj.paginator.count
+    else:
+        pos = balance_flags(list(queryset))
+        po_count = len(pos)
     if filter_value == 'needs_attention':
         pos = [po for po in pos if po.summary['code'] in ('menunggu_keterangan', 'kurang_kirim')]
     elif filter_value:
         pos = [po for po in pos if po.summary['code'] == filter_value]
-    page_obj = Paginator(pos, 30).get_page(request.GET.get('page'))
+    if filter_value:
+        page_obj = Paginator(pos, 30).get_page(request.GET.get('page'))
+        po_count = len(pos)
     return render(
         request,
         'po_list.html',
@@ -1250,7 +1262,7 @@ def render_po_list(request, cmt=None, legacy=False):
             'filter': filter_value,
             'q': q,
             'page_obj': page_obj,
-            'po_count': len(pos),
+            'po_count': po_count,
             'status_choices': [
                 ('needs_attention', 'Perlu tindak lanjut selisih'),
                 ('menunggu_keterangan', 'Menunggu Keterangan'),
@@ -1299,7 +1311,7 @@ def po_rows(po, rolls):
         selected = [
             roll for roll in rolls if roll.material_id == material_id and roll.color_id == color_id
         ]
-        total_yard = None if is_legacy else sum((roll.yard for roll in selected), 0)
+        total_yard = None if is_legacy else sum((roll.usable_yard for roll in selected), 0)
         rows.append(
             {
                 **status,
@@ -1724,12 +1736,20 @@ def history(request):
     )
 
 
-def download_xlsx(name, headings, records):
+def download_xlsx(name, headings, records, invoice=None):
     workbook = Workbook()
     sheet = workbook.active
     sheet.append(headings)
     for row in records:
         sheet.append(row)
+        for cell in sheet[sheet.max_row]:
+            if isinstance(cell.value, str):
+                cell.data_type = 's'
+    if invoice:
+        from .defect_exports import add_adjustment_sheets, load_adjustments
+
+        load_adjustments([invoice])
+        add_adjustment_sheets(workbook, [invoice])
     output = BytesIO()
     workbook.save(output)
     response = HttpResponse(
@@ -1741,8 +1761,11 @@ def download_xlsx(name, headings, records):
 
 
 @access('purchasing', 'direktur')
+@transaction.atomic
 def invoice_export(request, pk):
-    invoice = get_object_or_404(Invoice, pk=pk)
+    invoice = get_object_or_404(
+        Invoice.objects.select_for_update(of=('self',)).select_related('vendor'), pk=pk
+    )
     rows = (
         Roll.objects.filter(invoice=invoice)
         .select_related('material', 'color', 'invoice_po__po', 'alokasi__po', 'alokasi__cmt')
@@ -1762,6 +1785,8 @@ def invoice_export(request, pk):
             'CMT',
             'Tanggal kirim',
             'Tanggal terima',
+            'Yard BS',
+            'Yard layak pakai',
         ],
         [
             [
@@ -1776,9 +1801,12 @@ def invoice_export(request, pk):
                 roll.alokasi.cmt.name if roll.alokasi_id else '',
                 roll.tgl_kirim,
                 roll.tgl_terima,
+                roll.bs_yard,
+                roll.usable_yard,
             ]
             for roll in rows
         ],
+        invoice=invoice,
     )
 
 

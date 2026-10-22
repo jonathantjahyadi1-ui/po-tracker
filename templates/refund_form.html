@@ -1,0 +1,9 @@
+{% extends 'base.html' %}{% load tracker %}
+{% block content %}
+<div class="page-head"><div><a class="back" href="{% url 'payment_detail' invoice.pk %}">Invoice {{ invoice.nomor }}</a><h1>Catat Refund Diterima</h1><p>{{ invoice.vendor.name }} · Catat uang yang benar-benar sudah diterima dari vendor.</p></div></div>
+<section class="panel form-section">{% include 'partials/payment_summary.html' %}</section>
+<form method="post" class="panel form-section section-gap" data-submit-form>{% csrf_token %}{{ form.request_id }}
+{% if form.errors %}<div class="form-error-summary" role="alert" data-error-summary tabindex="-1"><strong>Refund belum tersimpan.</strong>{{ form.non_field_errors }}{{ form.request_id.errors }}</div>{% endif %}
+{% for field in form.visible_fields %}<div class="field"><label for="{{ field.id_for_label }}">{{ field.label }}</label>{{ field }}{{ field.errors }}</div>{% endfor %}
+<p class="field-help">Penerimaan ini tidak mengubah pembayaran keluar, stok, atau status retur bahan.</p><div class="form-actions"><a class="button" href="{% url 'payment_detail' invoice.pk %}">Kembali</a><button class="button primary" type="submit">Simpan penerimaan refund</button></div></form>
+{% endblock %}
