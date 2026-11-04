@@ -1,3 +1,4 @@
+import json
 from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
 from uuid import uuid4
@@ -521,6 +522,100 @@ class MaterialUsageTests(TestCase):
         self.assertEqual(po_status(po)['code'], 'done')
         with self.assertRaises(ValidationError):
             set_legacy_snapshots(po, self.product, self.user)
+
+    def test_actual_usage_warning_uses_each_material_snapshot(self):
+        po, _ = self.ready()
+        self.result(po, pcs=40)
+        self.ready(material=self.other_material, nomor=po.nomor)
+        self.result(po, pcs=40, material=self.other_material)
+        self.save_usage(self.product, self.material, '3', edit=True)
+        for user in (self.user, self.director):
+            with self.subTest(role=user.role):
+                self.client.force_login(user)
+                response = self.client.get(reverse('po_detail', args=[po.pk]))
+                rows = {row['material_id']: row for row in response.context['rows']}
+                self.assertTrue(rows[self.material.pk]['usage_exceeds_patent'])
+                self.assertFalse(rows[self.other_material.pk]['usage_exceeds_patent'])
+                self.assertEqual(rows[self.material.pk]['pemakaian'], Decimal('2.50'))
+                self.assertContains(response, 'class="num usage-exceeded"', count=1)
+                self.assertContains(
+                    response,
+                    'Pemakaian yard melebihi paten. Seharusnya sesuai yard paten 2 yard/pcs.',
+                    count=1,
+                )
+
+    def test_actual_usage_does_not_warn_without_result_or_at_or_below_patent(self):
+        po, _ = self.ready()
+        self.client.force_login(self.user)
+        for pcs in (None, 0, 50, 60):
+            with self.subTest(pcs=pcs):
+                if pcs is not None:
+                    self.result(po, pcs=pcs)
+                response = self.client.get(reverse('po_detail', args=[po.pk]))
+                self.assertFalse(response.context['rows'][0]['usage_exceeds_patent'])
+                self.assertNotContains(response, 'usage-exceeded')
+                self.assertNotContains(response, 'Pemakaian yard melebihi paten')
+
+    def test_actual_usage_warning_checks_unrounded_yards_and_patent(self):
+        self.save_usage(self.product, self.material, '2.00000001', edit=True)
+        self.client.force_login(self.user)
+        for yard, exceeds in (('100', False), ('100.000001', True)):
+            with self.subTest(yard=yard):
+                po, _ = self.ready(yards=(yard,))
+                self.result(po, pcs=50)
+                response = self.client.get(reverse('po_detail', args=[po.pk]))
+                row = response.context['rows'][0]
+                self.assertEqual(row['pemakaian'], Decimal('2.00'))
+                self.assertEqual(row['usage_exceeds_patent'], exceeds)
+                if exceeds:
+                    self.assertContains(response, 'yard paten 2,00000001 yard/pcs')
+
+    def test_actual_usage_without_snapshot_has_no_excess_warning(self):
+        po, unit = self.ready()
+        self.result(po, pcs=40)
+        unit.delete()
+        self.client.force_login(self.user)
+        response = self.client.get(reverse('po_detail', args=[po.pk]))
+        self.assertFalse(response.context['rows'][0]['usage_exceeds_patent'])
+        self.assertNotContains(response, 'Pemakaian yard melebihi paten')
+        self.assertContains(response, 'Patokan belum ditetapkan')
+
+    def test_actual_usage_warning_excludes_unusable_bs_yards(self):
+        po, _ = self.ready()
+        Roll.objects.filter(alokasi__po=po).update(bs_yard=Decimal('20'))
+        self.result(po, pcs=40)
+        self.client.force_login(self.user)
+        response = self.client.get(reverse('po_detail', args=[po.pk]))
+        row = response.context['rows'][0]
+        self.assertEqual(row['pemakaian'], Decimal('2.00'))
+        self.assertFalse(row['usage_exceeds_patent'])
+        self.assertNotContains(response, 'Pemakaian yard melebihi paten')
+
+    def test_ajax_size_save_updates_and_clears_actual_usage_warning(self):
+        po, _ = self.ready()
+        self.client.force_login(self.user)
+        for pcs, exceeds in ((40, True), (50, False), (60, False), (40, True)):
+            with self.subTest(pcs=pcs):
+                result = Hasil.objects.filter(po=po).first()
+                size = result.sizes.first() if result else None
+                response = self.client.post(
+                    reverse('po_detail', args=[po.pk]),
+                    {
+                        'action': 'sizes',
+                        'material': self.material.pk,
+                        'color': self.color.pk,
+                        'hasil_id': result.pk if result else '',
+                        'sizes': json.dumps(
+                            [{'id': size.pk if size else None, 'label': 'All Size', 'pcs': pcs}]
+                        ),
+                    },
+                    HTTP_X_REQUESTED_WITH='XMLHttpRequest',
+                )
+                self.assertEqual(response.status_code, 200)
+                row = response.json()['rows'][0]
+                self.assertEqual(row['usage_exceeds_patent'], exceeds)
+                self.assertEqual(Decimal(row['usage_snapshot']), Decimal('2'))
+                self.assertEqual(Hasil.objects.get(po=po).pcs, pcs)
 
     def test_detail_and_list_share_status_and_finalize_field_error(self):
         po, unit = self.ready()

@@ -12,6 +12,14 @@ Implementasi PRD 12 Oktober 2026. Payment tetap memakai alur dan layanan yang su
 
 PO aktif lama tanpa snapshot menampilkan **Patokan belum ditetapkan**. Purchasing memilih produk dan menekan **Tetapkan patokan unit lama** setelah mengisi Master. Hanya snapshot yang belum ada yang ditambahkan; snapshot lama tidak disegarkan. PO historis yang sudah selesai tidak dibuka kembali.
 
+Di Detail PO pada CMT, pemakaian aktual yang melebihi paten ditandai merah dengan
+keterangan agar pemakaian yard sesuai yard paten dan nilai patokannya dalam yard/pcs.
+Pembandingnya adalah snapshot paten dari Master untuk setiap bahan/warna; perubahan
+Master berikutnya tetap tidak mengubah acuan PO lama. Pemeriksaan menggunakan yard
+layak pakai dan hasil produksi sebelum pembulatan tampilan. Peringatan diperbarui
+setelah hasil ukuran disimpan dan hilang saat pemakaian sudah sesuai atau lebih kecil.
+Hasil kosong/nol dan unit tanpa patokan tidak memunculkan peringatan kelebihan.
+
 ## Data dan perhitungan
 
 - `Master.kind=product` menyediakan identitas produk; `Po.product` menyimpan ID. Teks `Po.produk` serta `pemakaian_std` lama tetap dipertahankan.

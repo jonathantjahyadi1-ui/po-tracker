@@ -284,6 +284,8 @@ h3 { margin:0; font-size:15px; line-height:1.4; font-weight:600; }
 .material-footer .field-help { margin:0; }
 .optional { font-size:12px; font-weight:400; color:var(--muted); margin-left:4px; }
 .cell-note { display:block; margin-top:4px; font-size:12px; color:var(--muted); }
+.usage-exceeded { color:var(--danger); background:var(--danger-soft); font-weight:600; }
+.usage-warning { max-width:28ch; margin-left:auto; color:var(--danger); font-weight:400; white-space:normal; line-height:1.5; }
 .list-context { display:flex; justify-content:space-between; gap:16px; padding:14px 1px; font-size:13px; color:var(--muted); }
 .pagination { display:flex; justify-content:flex-end; align-items:center; gap:12px; margin-top:18px; font-size:13px; color:var(--muted); }
 .table-wrap { overscroll-behavior-x:contain; }

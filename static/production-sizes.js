@@ -115,7 +115,14 @@ document.addEventListener('DOMContentLoaded', () => {
       main.querySelector('[data-item-shipped]').textContent = row.shipped;
       main.querySelector('[data-item-remaining]').textContent = row.remaining ?? '—';
       main.querySelector('[data-item-status]').replaceChildren(element('span', row.status_label, 'status ' + row.status_key));
-      main.querySelector('[data-item-usage]').textContent = row.pemakaian === null ? '—' : Number(row.pemakaian).toLocaleString('id-ID', {minimumFractionDigits: 2});
+      const usage = main.querySelector('[data-item-usage]');
+      usage.textContent = row.pemakaian === null ? '—' : Number(row.pemakaian).toLocaleString('id-ID', {minimumFractionDigits: 2});
+      usage.classList.toggle('usage-exceeded', row.usage_exceeds_patent);
+      if (row.usage_exceeds_patent) {
+        const patent = Number(row.usage_snapshot).toLocaleString('id-ID', {maximumFractionDigits: 8});
+        usage.append(element('small', 'Pemakaian yard melebihi paten. Seharusnya sesuai yard paten ' +
+          patent + ' yard/pcs.', 'cell-note usage-warning'));
+      }
       const estimateUnit = document.querySelector('[data-estimate-unit="' + row.row_key + '"]');
       if (estimateUnit) {
         estimateUnit.querySelector('[data-estimate-value]').textContent = row.estimate === null ? '—' : row.estimate + ' pcs';

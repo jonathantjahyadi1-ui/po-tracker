@@ -1336,6 +1336,13 @@ def po_rows(po, rolls):
                 'pemakaian': (
                     None if is_legacy else hitung_pemakaian(total_yard, status['hasil'] or 0)
                 ),
+                # Compare the original decimals so display rounding cannot hide an excess.
+                'usage_exceeds_patent': (
+                    not is_legacy
+                    and status['usage_snapshot'] is not None
+                    and bool(status['hasil'])
+                    and total_yard > status['usage_snapshot'] * status['hasil']
+                ),
             }
         )
     return rows, sorted(dates)
@@ -1379,6 +1386,7 @@ def size_response(po):
                     'status_key',
                     'status_label',
                     'pemakaian',
+                    'usage_exceeds_patent',
                     'estimate',
                     'difference',
                     'usage_snapshot',
