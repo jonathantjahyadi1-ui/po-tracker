@@ -14,6 +14,9 @@ di folder proyek lalu jalankan:
 
 Buka `http://127.0.0.1:8765/login/` dan tekan `Ctrl+C` untuk menghentikan server.
 Launcher ini menyiapkan virtual environment jika belum ada dan menjalankan migrasi.
+Database aktif dan jumlah data ditampilkan sebelum server berjalan. Jika `.env`
+berisi `DATABASE_URL`, input lokal langsung disimpan ke PostgreSQL/Supabase pada
+`DATABASE_SCHEMA` yang sama. Data SQLite lama tidak dipindahkan otomatis.
 
 Jika ingin menjalankan langkahnya secara manual:
 
@@ -99,12 +102,44 @@ angka agregat sampai rincian dilengkapi; kiriman lama tidak dibagi otomatis.
 
 - `DEBUG`: `true` untuk lokal; `false` untuk produksi.
 - `SECRET_KEY`: wajib di produksi.
-- `DATABASE_URL`: URL PostgreSQL produksi. Tanpa URL, mode lokal memakai SQLite.
+- `DATABASE_URL`: URL PostgreSQL/Supabase, dipakai juga saat `DEBUG=true`.
+- `DEV_DATABASE_URL`: opsional, menggantikan `DATABASE_URL` khusus mode lokal.
+- `LOCAL_DATABASE`: opsional, memilih file SQLite secara eksplisit saat `DEBUG=true`,
+  termasuk ketika `DATABASE_URL` terisi. Tanpa URL PostgreSQL, lokal memakai
+  `severli.sqlite3`.
 - `DATABASE_SCHEMA`: schema privat PostgreSQL untuk versi ini, misalnya `severli`.
+  Wajib juga untuk koneksi PostgreSQL lokal; gunakan schema yang sama saat ingin
+  membaca data produksi. Di Supabase Table Editor, pilih schema **severli**,
+  bukan `public` atau schema lama `po_tracking`.
 - `LEGACY_USERS_SCHEMA`: opsional, schema akun lama yang perlu disalin saat deploy.
 - `DATABASE_SSL`: `require` secara default; `disable` untuk PostgreSQL lokal.
 - `ALLOWED_HOSTS`, `CSRF_TRUSTED_ORIGINS`: host dan origin aplikasi.
 - `TEST_DATABASE_URL`: opsional untuk menjalankan tes di PostgreSQL terpisah.
+  Tes tidak memakai `DATABASE_URL` maupun `DEV_DATABASE_URL`.
+
+Periksa tujuan penyimpanan tanpa menampilkan kredensial:
+
+```powershell
+$env:DEBUG = 'true'
+./.venv/Scripts/python.exe manage.py database_status
+```
+
+Reset data percobaan selalu dimulai dengan pratinjau:
+
+```powershell
+./.venv/Scripts/python.exe manage.py reset_trial_data
+./.venv/Scripts/python.exe manage.py reset_trial_data --apply --backup .verification/backups/trial-before-reset.json
+```
+
+Perintah ini menghapus **seluruh transaksi**: PO, invoice, roll, alokasi/penerimaan
+CMT, hasil produksi, kiriman, pembayaran, BS/refund, lampiran, dan log percobaan.
+Akun beserta password/hak akses, seluruh Master (termasuk CMT), dan patokan
+pemakaian bahan tetap identik. Backup JSON harus berhasil ditulis dan diverifikasi
+sebelum penghapusan; file yang sudah ada tidak ditimpa. Backup memuat data privat,
+termasuk hash password dan lampiran, sehingga simpan di lokasi privat yang diabaikan Git.
+Perintah hanya menyentuh schema/file database aktif, tidak schema lama atau SQLite lain.
+Jika perlu pemulihan, lakukan segera pada database yang masih kosong melalui
+`manage.py loaddata <file-backup.json>`; backup mencakup data sebelum reset.
 
 ## Deploy
 

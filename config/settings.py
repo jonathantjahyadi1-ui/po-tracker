@@ -71,10 +71,16 @@ for schema in (DATABASE_SCHEMA, LEGACY_USERS_SCHEMA):
     if schema and not re.fullmatch(r'[a-z_][a-z0-9_]*', schema):
         raise ImproperlyConfigured('Nama schema database tidak valid.')
 if TESTING:
+    DATABASE_URL_SOURCE = 'TEST_DATABASE_URL'
     DATABASE_URL = os.getenv('TEST_DATABASE_URL')
+elif DEBUG and os.getenv('LOCAL_DATABASE'):
+    DATABASE_URL_SOURCE = 'LOCAL_DATABASE'
+    DATABASE_URL = None
 elif DEBUG:
-    DATABASE_URL = os.getenv('DEV_DATABASE_URL')
+    DATABASE_URL_SOURCE = 'DEV_DATABASE_URL' if os.getenv('DEV_DATABASE_URL') else 'DATABASE_URL'
+    DATABASE_URL = os.getenv('DEV_DATABASE_URL') or os.getenv('DATABASE_URL')
 else:
+    DATABASE_URL_SOURCE = 'DATABASE_URL'
     DATABASE_URL = os.getenv('DATABASE_URL')
 if DATABASE_URL:
     parsed = urlparse(DATABASE_URL)
@@ -89,13 +95,16 @@ if DATABASE_URL:
             'HOST': parsed.hostname,
             'PORT': parsed.port or 5432,
             'CONN_MAX_AGE': 60,
-            'OPTIONS': {'sslmode': os.getenv('DATABASE_SSL', 'require')},
+            'OPTIONS': {'sslmode': os.getenv('DATABASE_SSL', 'require'), 'connect_timeout': 10},
         }
     }
     if DATABASE_SCHEMA:
         DATABASES['default']['OPTIONS']['options'] = f'-c search_path={DATABASE_SCHEMA}'
-    elif not DEBUG and not TESTING:
-        raise ImproperlyConfigured('DATABASE_SCHEMA wajib diisi untuk produksi.')
+    elif not TESTING:
+        raise ImproperlyConfigured(
+            'DATABASE_SCHEMA wajib diisi untuk PostgreSQL, misalnya severli. '
+            'Gunakan schema yang sama dengan aplikasi produksi.'
+        )
 elif DEBUG or TESTING:
     DATABASES = {
         'default': {

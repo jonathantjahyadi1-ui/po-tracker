@@ -15,6 +15,10 @@ if (-not (Test-Path -LiteralPath '.venv\Scripts\python.exe')) {
     if ($LASTEXITCODE -ne 0) { throw 'Instalasi dependensi gagal.' }
 }
 $env:DEBUG = 'true'
+& '.\.venv\Scripts\python.exe' manage.py prepare_database
+if ($LASTEXITCODE -ne 0) { throw 'Persiapan database gagal.' }
 & '.\.venv\Scripts\python.exe' manage.py migrate --noinput
 if ($LASTEXITCODE -ne 0) { throw 'Migrasi gagal.' }
+& '.\.venv\Scripts\python.exe' manage.py database_status
+if ($LASTEXITCODE -ne 0) { throw 'Pemeriksaan database gagal.' }
 & '.\.venv\Scripts\python.exe' manage.py runserver 127.0.0.1:8765
